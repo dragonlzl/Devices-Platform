@@ -179,3 +179,28 @@ def test_admin_performance_sort_order(page, base_url):
     expect(rows.nth(2)).to_contain_text("Perf-High")
     expect(rows.nth(3)).to_contain_text("Perf-Strong")
 
+
+def test_admin_device_form_quick_add_buttons(page, base_url):
+    page.goto(f"{base_url}/admin")
+    page.get_by_role("button", name="添加设备").click()
+    expect(page.locator(".ant-drawer-title", has_text="添加设备")).to_be_visible()
+
+    vendor_select = page.locator(".ant-form-item", has_text="厂商").locator(".ant-select")
+    vendor_select.click()
+    expect(page.get_by_role("button", name="新增厂商")).to_be_visible()
+    page.get_by_role("button", name="新增厂商").click()
+    expect(page.locator(".ant-drawer-title", has_text="新增厂商")).to_be_visible()
+    page.locator(".ant-drawer-open").get_by_role("button", name="取消").click()
+    expect(page.locator(".ant-drawer-title", has_text="添加设备")).to_be_visible()
+
+    system_select = page.locator(".ant-form-item", has_text="系统").locator(".ant-select")
+    system_select.click()
+    expect(page.get_by_role("button", name="新增系统")).to_be_visible()
+    page.keyboard.press("Escape")
+
+    version_select = page.locator(".ant-form-item", has_text="系统版本").locator(".ant-select")
+    version_select.click()
+    expect(page.get_by_role("button", name="新增版本")).to_be_visible()
+    page.get_by_role("button", name="新增版本").click()
+    notice = page.locator(".ant-message-notice").first
+    expect(notice).to_contain_text("请先选择系统")

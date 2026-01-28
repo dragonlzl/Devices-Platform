@@ -8,6 +8,7 @@ FEISHU_CA_BUNDLE 指定证书路径。
 
 import json
 import os
+import re
 import sys
 import ssl
 import socket
@@ -163,11 +164,29 @@ def read_feature_log_records(repo_dir: str) -> list:
             text = line[1:].strip()
             if "更新记录" not in text:
                 continue
-            if text in seen:
+            latest_update = extract_latest_update(text)
+            if not latest_update:
                 continue
-            seen.add(text)
-            records.append(text)
+            if latest_update in seen:
+                continue
+            seen.add(latest_update)
+            records.append(latest_update)
     return records
+
+
+def extract_latest_update(record_line: str) -> str:
+    if "更新记录" not in record_line:
+        return ""
+    text = record_line.split("更新记录：", 1)[-1].strip()
+    if not text:
+        return ""
+    segments = [item.strip() for item in text.split("。") if item.strip()]
+    if segments:
+        return segments[-1]
+    matches = list(re.finditer(r"\d{4}-\d{2}-\d{2}[^。]*", text))
+    if matches:
+        return matches[-1].group(0).strip()
+    return text
 
 
 def build_message_text(repo_dir: str) -> str:

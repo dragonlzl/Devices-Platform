@@ -156,44 +156,58 @@ function ConfirmDrawer(props: {
 function DeviceFormDrawer(props: {
   open: boolean;
   device?: Device | null;
+  draft?: Record<string, unknown> | null;
   vendors: Vendor[];
   systems: SystemItem[];
   onCancel: () => void;
   onSaved: (values: Record<string, unknown>, device?: Device | null) => void;
   onDelete: (device: Device) => void;
+  onAddVendor: (draft: Record<string, unknown>, device?: Device | null) => void;
+  onAddSystem: (draft: Record<string, unknown>, device?: Device | null) => void;
+  onAddVersion: (draft: Record<string, unknown>, system: SystemItem, device?: Device | null) => void;
 }) {
   const [form] = Form.useForm();
   const [versions, setVersions] = useState<SystemVersion[]>([]);
 
   useEffect(() => {
     if (!props.open) return;
-    if (props.device) {
-      form.setFieldsValue({
-        model: props.device.model,
-        status: props.device.status,
-        type: props.device.type || undefined,
-        vendor_id: props.device.vendor_id,
-        system_id: props.device.system_id,
-        system_version_id: props.device.system_version_id,
-        resolution: props.device.resolution || undefined,
-        arch: props.device.arch || undefined,
-        cpu: props.device.cpu || undefined,
-        boot_password: props.device.boot_password || undefined,
-        notes: props.device.notes || undefined,
-      });
-      const system = props.systems.find((item) => item.id === props.device?.system_id);
-      setVersions(system?.versions || []);
-    } else {
+    const source = (props.draft ?? props.device) as Partial<Device> | null;
+    if (!source) {
       form.resetFields();
       setVersions([]);
+      return;
     }
-  }, [props.open, props.device, props.systems, form]);
+    form.setFieldsValue({
+      model: source.model || undefined,
+      status: source.status || undefined,
+      type: source.type || undefined,
+      vendor_id: source.vendor_id ?? undefined,
+      system_id: source.system_id ?? undefined,
+      system_version_id: source.system_version_id ?? undefined,
+      resolution: source.resolution || undefined,
+      arch: source.arch || undefined,
+      cpu: source.cpu || undefined,
+      boot_password: source.boot_password || undefined,
+      notes: source.notes || undefined,
+    });
+    const systemId = source.system_id ? Number(source.system_id) : null;
+    const system = systemId ? props.systems.find((item) => item.id === systemId) : undefined;
+    setVersions(system?.versions || []);
+  }, [props.open, props.device, props.draft, props.systems, form]);
 
   const handleSystemChange = (value: number) => {
     const system = props.systems.find((item) => item.id === value);
     setVersions(system?.versions || []);
     form.setFieldsValue({ system_version_id: undefined });
   };
+  const buildDraft = () => form.getFieldsValue();
+  const renderDropdownFooter = (label: string, onClick: () => void) => (
+    <div style={{ borderTop: '1px solid #f0f0f0', padding: '8px 12px' }}>
+      <Button type="link" icon={<PlusOutlined />} onClick={onClick}>
+        {label}
+      </Button>
+    </div>
+  );
 
   return (
     <Drawer
@@ -232,6 +246,12 @@ function DeviceFormDrawer(props: {
           <Select
             placeholder="选择厂商"
             options={props.vendors.map((item) => ({ value: item.id, label: item.name }))}
+            dropdownRender={(menu) => (
+              <>
+                {menu}
+                {renderDropdownFooter('新增厂商', () => props.onAddVendor(buildDraft(), props.device))}
+              </>
+            )}
           />
         </Form.Item>
         <Form.Item
@@ -243,6 +263,12 @@ function DeviceFormDrawer(props: {
             placeholder="选择系统"
             options={props.systems.map((item) => ({ value: item.id, label: item.name }))}
             onChange={handleSystemChange}
+            dropdownRender={(menu) => (
+              <>
+                {menu}
+                {renderDropdownFooter('新增系统', () => props.onAddSystem(buildDraft(), props.device))}
+              </>
+            )}
           />
         </Form.Item>
         <Form.Item
@@ -253,6 +279,21 @@ function DeviceFormDrawer(props: {
           <Select
             placeholder="选择系统版本"
             options={versions.map((item) => ({ value: item.id, label: item.version }))}
+            dropdownRender={(menu) => (
+              <>
+                {menu}
+                {renderDropdownFooter('新增版本', () => {
+                  const draft = buildDraft();
+                  const systemId = draft.system_id ? Number(draft.system_id) : null;
+                  const system = systemId ? props.systems.find((item) => item.id === systemId) : null;
+                  if (!system) {
+                    message.error('请先选择系统');
+                    return;
+                  }
+                  props.onAddVersion(draft, system, props.device);
+                })}
+              </>
+            )}
           />
         </Form.Item>
         <Form.Item label="分辨率" name="resolution">
@@ -943,6 +984,9 @@ export default function AdminApp() {
   const [drawer, setDrawer] = useState<DrawerState | null>(null);
   const [detailDevice, setDetailDevice] = useState<Device | null>(null);
   const [requestDetail, setRequestDetail] = useState<BorrowRequestItem | null>(null);
+  const [deviceDraft, setDeviceDraft] = useState<Record<string, unknown> | null>(null);
+  const [deviceDraftDevice, setDeviceDraftDevice] = useState<Device | null>(null);
+  const [returnToDeviceForm, setReturnToDeviceForm] = useState(false);
   const [sortState, setSortState] = useState<{ key: string; order: SortOrder } | null>(null);
   const [modelTestingId, setModelTestingId] = useState<number | null>(null);
   const [modelName, setModelName] = useState('未配置');
@@ -1130,6 +1174,20 @@ export default function AdminApp() {
 
   const openDrawer = (state: DrawerState) => setDrawer(state);
   const closeDrawer = () => setDrawer(null);
+  const resetDeviceDraft = () => {
+    setDeviceDraft(null);
+    setDeviceDraftDevice(null);
+    setReturnToDeviceForm(false);
+  };
+  const reopenDeviceForm = () => {
+    setReturnToDeviceForm(false);
+    openDrawer({ type: 'device-form', payload: deviceDraftDevice || undefined });
+  };
+  const returnToDeviceFormIfNeeded = () => {
+    if (!returnToDeviceForm) return false;
+    reopenDeviceForm();
+    return true;
+  };
 
   const currentDevice =
     drawer?.type === 'device-form' || drawer?.type === 'device-delete' || drawer?.type === 'device-return'
@@ -1263,7 +1321,15 @@ export default function AdminApp() {
           <Button size="small" onClick={() => setDetailDevice(record)}>
             详情
           </Button>
-          <Button size="small" onClick={() => openDrawer({ type: 'device-form', payload: record })}>
+          <Button
+            size="small"
+            onClick={() => {
+              setDeviceDraft(null);
+              setReturnToDeviceForm(false);
+              setDeviceDraftDevice(record);
+              openDrawer({ type: 'device-form', payload: record });
+            }}
+          >
             编辑
           </Button>
           <Button
@@ -1462,13 +1528,32 @@ export default function AdminApp() {
               </Typography.Text>
             </Space>
             <div className="toolbar">
-              <Button type="primary" icon={<PlusOutlined />} onClick={() => openDrawer({ type: 'device-form' })}>
+              <Button
+                type="primary"
+                icon={<PlusOutlined />}
+                onClick={() => {
+                  resetDeviceDraft();
+                  openDrawer({ type: 'device-form' });
+                }}
+              >
                 添加设备
               </Button>
-              <Button icon={<SettingOutlined />} onClick={() => openDrawer({ type: 'vendor-list' })}>
+              <Button
+                icon={<SettingOutlined />}
+                onClick={() => {
+                  setReturnToDeviceForm(false);
+                  openDrawer({ type: 'vendor-list' });
+                }}
+              >
                 厂商配置
               </Button>
-              <Button icon={<SettingOutlined />} onClick={() => openDrawer({ type: 'system-list' })}>
+              <Button
+                icon={<SettingOutlined />}
+                onClick={() => {
+                  setReturnToDeviceForm(false);
+                  openDrawer({ type: 'system-list' });
+                }}
+              >
                 系统配置
               </Button>
               <Button icon={<SettingOutlined />} onClick={() => openDrawer({ type: 'notify' })}>
@@ -1756,9 +1841,13 @@ export default function AdminApp() {
       <DeviceFormDrawer
         open={drawer?.type === 'device-form'}
         device={currentDevice}
+        draft={deviceDraft}
         vendors={vendors}
         systems={systems}
-        onCancel={closeDrawer}
+        onCancel={() => {
+          resetDeviceDraft();
+          closeDrawer();
+        }}
         onDelete={(device) => openDrawer({ type: 'device-delete', payload: device })}
         onSaved={async (values, device) => {
           const payload = {
@@ -1786,11 +1875,30 @@ export default function AdminApp() {
               await apiRequest('/api/devices', { method: 'POST', body: payload });
               message.success('新增成功');
             }
+            resetDeviceDraft();
             closeDrawer();
             loadData();
           } catch (err) {
             message.error((err as Error).message);
           }
+        }}
+        onAddVendor={(draft, device) => {
+          setDeviceDraft(draft);
+          setDeviceDraftDevice(device || null);
+          setReturnToDeviceForm(true);
+          openDrawer({ type: 'vendor-form' });
+        }}
+        onAddSystem={(draft, device) => {
+          setDeviceDraft(draft);
+          setDeviceDraftDevice(device || null);
+          setReturnToDeviceForm(true);
+          openDrawer({ type: 'system-form' });
+        }}
+        onAddVersion={(draft, system, device) => {
+          setDeviceDraft(draft);
+          setDeviceDraftDevice(device || null);
+          setReturnToDeviceForm(true);
+          openDrawer({ type: 'version-form', payload: system });
         }}
       />
 
@@ -1807,7 +1915,11 @@ export default function AdminApp() {
         open={drawer?.type === 'vendor-form'}
         vendor={currentVendor}
         vendors={vendors}
-        onCancel={() => openDrawer({ type: 'vendor-list' })}
+        onCancel={() => {
+          if (!returnToDeviceFormIfNeeded()) {
+            openDrawer({ type: 'vendor-list' });
+          }
+        }}
         onSaved={async (name, vendor) => {
           try {
             if (vendor) {
@@ -1818,7 +1930,9 @@ export default function AdminApp() {
               message.success('新增成功');
             }
             loadData();
-            openDrawer({ type: 'vendor-list' });
+            if (!returnToDeviceFormIfNeeded()) {
+              openDrawer({ type: 'vendor-list' });
+            }
           } catch (err) {
             message.error((err as Error).message);
           }
@@ -1863,7 +1977,11 @@ export default function AdminApp() {
         open={drawer?.type === 'system-form'}
         system={currentSystem}
         systems={systems}
-        onCancel={() => openDrawer({ type: 'system-list' })}
+        onCancel={() => {
+          if (!returnToDeviceFormIfNeeded()) {
+            openDrawer({ type: 'system-list' });
+          }
+        }}
         onSaved={async (name, system) => {
           try {
             if (system) {
@@ -1874,7 +1992,9 @@ export default function AdminApp() {
               message.success('新增成功');
             }
             loadData();
-            openDrawer({ type: 'system-list' });
+            if (!returnToDeviceFormIfNeeded()) {
+              openDrawer({ type: 'system-list' });
+            }
           } catch (err) {
             message.error((err as Error).message);
           }
@@ -1884,13 +2004,19 @@ export default function AdminApp() {
       <VersionFormDrawer
         open={drawer?.type === 'version-form'}
         system={currentSystem}
-        onCancel={() => openDrawer({ type: 'system-list' })}
+        onCancel={() => {
+          if (!returnToDeviceFormIfNeeded()) {
+            openDrawer({ type: 'system-list' });
+          }
+        }}
         onSaved={async (version, system) => {
           try {
             await apiRequest(`/api/systems/${system.id}/versions`, { method: 'POST', body: { version } });
             message.success('新增成功');
             loadData();
-            openDrawer({ type: 'system-list' });
+            if (!returnToDeviceFormIfNeeded()) {
+              openDrawer({ type: 'system-list' });
+            }
           } catch (err) {
             message.error((err as Error).message);
           }
