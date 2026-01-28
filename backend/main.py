@@ -5,6 +5,7 @@ from typing import Any, Dict, List, Optional, Union
 
 import httpx
 import os
+from pathlib import Path
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
@@ -35,7 +36,9 @@ from .schemas import (
 )
 
 
-BASE_DIR = "{}".format(__file__)
+BASE_DIR = Path(__file__).resolve()
+BACKEND_DIR = BASE_DIR.parent
+REPO_DIR = BACKEND_DIR.parent
 
 app = FastAPI()
 app.add_middleware(
@@ -46,10 +49,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-frontend_root = __file__.rsplit("/backend", 1)[0] + "/frontend"
-frontend_dist = os.path.join(frontend_root, "dist")
-frontend_dir = frontend_dist if os.path.exists(frontend_dist) else frontend_root
-app.mount("/static", StaticFiles(directory=frontend_dir), name="static")
+frontend_root = REPO_DIR / "frontend"
+frontend_dist = frontend_root / "dist"
+frontend_dir = frontend_dist if frontend_dist.exists() else frontend_root
+app.mount("/static", StaticFiles(directory=str(frontend_dir)), name="static")
 
 
 @app.get("/")
@@ -59,12 +62,12 @@ async def root():
 
 @app.get("/admin")
 async def admin_page():
-    return FileResponse(frontend_dir + "/admin.html")
+    return FileResponse(str(frontend_dir / "admin.html"))
 
 
 @app.get("/borrow")
 async def borrow_page():
-    return FileResponse(frontend_dir + "/borrow.html")
+    return FileResponse(str(frontend_dir / "borrow.html"))
 
 
 def _ensure_required(value: Optional[str], label: str):
