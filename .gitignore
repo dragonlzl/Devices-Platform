@@ -1,0 +1,26 @@
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# db
+app.db
+data/*.db
+data/*test*.db
+
+# secrets
+feishu_config.json
+.env
+.env.*
+
+# node
+frontend/node_modules/
+frontend/dist/
+
+# os
+.DS_Store
+
+# data
+移动设备.xlsx

@@ -1,0 +1,7 @@
+{
+  "borrow_webhook": "",
+  "return_webhook": "",
+  "overdue_webhook": "",
+  "extend_webhook": "",
+  "pending_webhook": ""
+}
