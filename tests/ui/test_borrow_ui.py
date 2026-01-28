@@ -84,6 +84,7 @@ def test_borrow_flow(page, base_url):
     page.goto(f"{base_url}/borrow")
     expect(page.get_by_placeholder("输入型号/系统/厂商等关键词")).to_be_visible()
     expect(page.get_by_text("智能搜索输出")).to_be_visible()
+    expect(page.get_by_text("设备总数")).to_be_visible()
     expect(page.get_by_role("button", name="更快")).to_be_visible()
     expect(page.get_by_role("button", name="更准")).to_be_visible()
     row = page.locator("tr", has_text="BorrowPhone").first

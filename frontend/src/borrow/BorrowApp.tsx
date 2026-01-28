@@ -180,9 +180,13 @@ export default function BorrowApp() {
   const [borrowDevice, setBorrowDevice] = useState<Device | null>(null);
   const [extendDevice, setExtendDevice] = useState<Device | null>(null);
   const [detailDevice, setDetailDevice] = useState<Device | null>(null);
-  const [sortState, setSortState] = useState<{ key: string; order: SortOrder } | null>(null);
+  const [sortState, setSortState] = useState<{ key: string; order: SortOrder } | null>({
+    key: 'status',
+    order: 'ascend',
+  });
   const [modelName, setModelName] = useState('未配置');
   const [modelLoading, setModelLoading] = useState(false);
+  const [deviceTotal, setDeviceTotal] = useState(0);
   const [fastModelId, setFastModelId] = useState<number | null>(null);
   const [accurateModelId, setAccurateModelId] = useState<number | null>(null);
   const [fastModelName, setFastModelName] = useState('未配置');
@@ -207,6 +211,12 @@ export default function BorrowApp() {
     一般: 2,
     较低: 3,
   };
+  const getStatusRank = (value?: string | null) => (value === '正常' ? 0 : 1);
+  const compareStatus = (a?: string | null, b?: string | null) => {
+    const diff = getStatusRank(a) - getStatusRank(b);
+    if (diff !== 0) return diff;
+    return (a || '').localeCompare(b || '');
+  };
   const getPerformanceRank = (notes?: string | null) => {
     const value = extractPerformance(notes);
     return performanceOrder[value] ?? 99;
@@ -219,6 +229,9 @@ export default function BorrowApp() {
       const data = await apiRequest<{ items: Device[] }>(url);
       setDevices(data.items || []);
       setAiReason('');
+      if (!q) {
+        setDeviceTotal(data.items?.length || 0);
+      }
     } catch (err) {
       message.error((err as Error).message);
     } finally {
@@ -230,6 +243,7 @@ export default function BorrowApp() {
     try {
       const data = await apiRequest<{ items: Device[] }>('/api/devices');
       const latest = new Map(data.items.map((item) => [item.id, item]));
+      setDeviceTotal(data.items?.length || 0);
       setDevices((prev) =>
         prev.map((item) => {
           const fresh = latest.get(item.id);
@@ -311,7 +325,7 @@ export default function BorrowApp() {
       title: '设备状态',
       dataIndex: 'status',
       key: 'status',
-      sorter: (a: Device, b: Device) => (a.status || '').localeCompare(b.status || ''),
+      sorter: (a: Device, b: Device) => compareStatus(a.status, b.status),
       sortOrder: sortState?.key === 'status' ? sortState.order : null,
       render: (value: string) => <Tag color={value === '正常' ? 'green' : 'volcano'}>{value}</Tag>,
     },
@@ -491,12 +505,17 @@ export default function BorrowApp() {
       });
       return sorted;
     }
+    if (key === 'status') {
+      sorted.sort((a, b) => {
+        const diff = compareStatus(a.status, b.status);
+        return isDesc ? -diff : diff;
+      });
+      return sorted;
+    }
     const getValue = (item: Device) => {
       switch (key) {
         case 'model':
           return item.model || '';
-        case 'status':
-          return item.status || '';
         case 'type':
           return item.type || '';
         case 'vendor_name':
@@ -663,6 +682,7 @@ export default function BorrowApp() {
                 </Button>
               </div>
               <Space>
+                <Typography.Text className="muted">设备总数：{deviceTotal}</Typography.Text>
                 {aiLoading ? (
                   <Space className="muted">
                     <Spin size="small" />

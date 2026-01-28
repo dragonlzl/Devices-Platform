@@ -114,6 +114,54 @@ def seed_performance_devices(base_url):
             )
 
 
+def seed_status_devices(base_url):
+    with httpx.Client(base_url=base_url) as client:
+        vendors = client.get("/api/vendors").json()["items"]
+        vendor = next((item for item in vendors if item["name"] == "StatusVendor"), None)
+        if not vendor:
+            client.post("/api/vendors", json={"name": "StatusVendor"})
+            vendors = client.get("/api/vendors").json()["items"]
+            vendor = next(item for item in vendors if item["name"] == "StatusVendor")
+        vendor_id = vendor["id"]
+
+        systems = client.get("/api/systems?include_versions=1").json()["items"]
+        system = next((item for item in systems if item["name"] == "StatusOS"), None)
+        if not system:
+            client.post("/api/systems", json={"name": "StatusOS"})
+            systems = client.get("/api/systems?include_versions=1").json()["items"]
+            system = next(item for item in systems if item["name"] == "StatusOS")
+        system_id = system["id"]
+        versions = system.get("versions") or []
+        if not versions:
+            client.post(f"/api/systems/{system_id}/versions", json={"version": "1.0"})
+            systems = client.get("/api/systems?include_versions=1").json()["items"]
+            system = next(item for item in systems if item["name"] == "StatusOS")
+            versions = system.get("versions") or []
+        version_id = versions[0]["id"]
+        client.post(
+            "/api/devices",
+            json={
+                "model": "Status-Normal",
+                "status": "正常",
+                "type": "手机",
+                "vendor_id": vendor_id,
+                "system_id": system_id,
+                "system_version_id": version_id,
+            },
+        )
+        client.post(
+            "/api/devices",
+            json={
+                "model": "Status-Broken",
+                "status": "损坏",
+                "type": "手机",
+                "vendor_id": vendor_id,
+                "system_id": system_id,
+                "system_version_id": version_id,
+            },
+        )
+
+
 
 def test_admin_add_device_validation(page, base_url):
     page.goto(f"{base_url}/admin")
@@ -122,6 +170,7 @@ def test_admin_add_device_validation(page, base_url):
     expect(page.get_by_role("menuitem", name="借用记录")).to_be_visible()
     expect(page.get_by_placeholder("输入型号/系统/厂商等关键词")).to_be_visible()
     expect(page.get_by_text("智能搜索输出")).to_be_visible()
+    expect(page.get_by_text("设备总数")).to_be_visible()
     expect(page.get_by_role("button", name="更快")).to_be_visible()
     expect(page.get_by_role("button", name="更准")).to_be_visible()
     expect(page.get_by_role("button", name="打开借用页")).to_be_visible()
@@ -178,6 +227,18 @@ def test_admin_performance_sort_order(page, base_url):
     expect(rows.nth(1)).to_contain_text("Perf-Normal")
     expect(rows.nth(2)).to_contain_text("Perf-High")
     expect(rows.nth(3)).to_contain_text("Perf-Strong")
+
+
+def test_admin_status_sort_normal_first(page, base_url):
+    seed_status_devices(base_url)
+    page.goto(f"{base_url}/admin")
+    page.get_by_placeholder("输入型号/系统/厂商等关键词").fill("Status-")
+    page.get_by_role("button", name="搜索").click()
+    rows = page.locator("tbody tr").filter(has_text="Status-")
+    expect(rows).to_have_count(2)
+
+    page.get_by_role("columnheader", name="设备状态").click()
+    expect(rows.nth(0)).to_contain_text("Status-Normal")
 
 
 def test_admin_device_form_quick_add_buttons(page, base_url):

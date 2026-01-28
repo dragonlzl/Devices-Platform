@@ -66,6 +66,12 @@ function normalizeSorter(
 
 const STATUS_OPTIONS = ['正常', '损坏', '被常驻', '报修'];
 const TYPE_OPTIONS = ['手机', '平板'];
+const getStatusRank = (value?: string | null) => (value === '正常' ? 0 : 1);
+const compareStatus = (a?: string | null, b?: string | null) => {
+  const diff = getStatusRank(a) - getStatusRank(b);
+  if (diff !== 0) return diff;
+  return (a || '').localeCompare(b || '');
+};
 
 function renderDeviceType(value: string | null): ReactNode {
   if (value === '手机') {
@@ -981,13 +987,17 @@ export default function AdminApp() {
   const [aiLoading, setAiLoading] = useState(false);
   const [query, setQuery] = useState('');
   const [aiReason, setAiReason] = useState('');
+  const [deviceTotal, setDeviceTotal] = useState(0);
   const [drawer, setDrawer] = useState<DrawerState | null>(null);
   const [detailDevice, setDetailDevice] = useState<Device | null>(null);
   const [requestDetail, setRequestDetail] = useState<BorrowRequestItem | null>(null);
   const [deviceDraft, setDeviceDraft] = useState<Record<string, unknown> | null>(null);
   const [deviceDraftDevice, setDeviceDraftDevice] = useState<Device | null>(null);
   const [returnToDeviceForm, setReturnToDeviceForm] = useState(false);
-  const [sortState, setSortState] = useState<{ key: string; order: SortOrder } | null>(null);
+  const [sortState, setSortState] = useState<{ key: string; order: SortOrder } | null>({
+    key: 'status',
+    order: 'ascend',
+  });
   const [modelTestingId, setModelTestingId] = useState<number | null>(null);
   const [modelName, setModelName] = useState('未配置');
   const [modelLoading, setModelLoading] = useState(false);
@@ -1026,6 +1036,7 @@ export default function AdminApp() {
       setVendors(vendorRes.items || []);
       setSystems(systemRes.items || []);
       setDevices(deviceRes.items || []);
+      setDeviceTotal(deviceRes.items?.length || 0);
       setAiReason('');
     } catch (err) {
       message.error((err as Error).message);
@@ -1042,6 +1053,7 @@ export default function AdminApp() {
       setDevices(deviceRes.items || []);
       if (!q) {
         setAiReason('');
+        setDeviceTotal(deviceRes.items?.length || 0);
       }
     } catch (err) {
       message.error((err as Error).message);
@@ -1233,7 +1245,7 @@ export default function AdminApp() {
       title: '设备状态',
       dataIndex: 'status',
       key: 'status',
-      sorter: (a: Device, b: Device) => (a.status || '').localeCompare(b.status || ''),
+      sorter: (a: Device, b: Device) => compareStatus(a.status, b.status),
       sortOrder: sortState?.key === 'status' ? sortState.order : null,
       onHeaderCell: () => ({ className: 'compact-header' }),
       render: (value: string) => <Tag color={value === '正常' ? 'green' : 'volcano'}>{value}</Tag>,
@@ -1454,12 +1466,17 @@ export default function AdminApp() {
       });
       return sorted;
     }
+    if (key === 'status') {
+      sorted.sort((a, b) => {
+        const diff = compareStatus(a.status, b.status);
+        return isDesc ? -diff : diff;
+      });
+      return sorted;
+    }
     const getValue = (item: Device) => {
       switch (key) {
         case 'model':
           return item.model || '';
-        case 'status':
-          return item.status || '';
         case 'type':
           return item.type || '';
         case 'vendor_name':
@@ -1700,6 +1717,7 @@ export default function AdminApp() {
                       </Button>
                     </div>
                     <Space>
+                      <Typography.Text className="muted">设备总数：{deviceTotal}</Typography.Text>
                       {aiLoading ? (
                         <Space className="muted">
                           <Spin size="small" />
