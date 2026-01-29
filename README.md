@@ -17,8 +17,10 @@
 ```bat
 start_windows.bat
 ```
-可选参数：`start_windows.bat [PORT] [DB_FILE]`  
-示例：`start_windows.bat 8090 app.db`
+可选参数：`start_windows.bat [PORT] [DB_FILE] [PROJECT_DIR]`  
+示例：`start_windows.bat 8090 app.db D:\Devices-Platform`
+
+也可设置环境变量 `PHONETOOL_HOME` 指向项目目录，脚本会自动在该目录启动。
 
 ### macOS / Linux
 ```bash
