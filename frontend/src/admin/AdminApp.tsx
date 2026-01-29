@@ -1184,6 +1184,15 @@ export default function AdminApp() {
     }
   }, [activeMenu]);
 
+  useEffect(() => {
+    if (activeMenu !== 'pending') return;
+    const timer = window.setInterval(() => {
+      if (document.visibilityState !== 'visible') return;
+      loadBorrowRequests(pendingQuery.trim() || undefined);
+    }, 5000);
+    return () => window.clearInterval(timer);
+  }, [activeMenu, pendingQuery]);
+
   const openDrawer = (state: DrawerState) => setDrawer(state);
   const closeDrawer = () => setDrawer(null);
   const resetDeviceDraft = () => {
@@ -1397,16 +1406,40 @@ export default function AdminApp() {
       render: (value: string) => formatDateTime(value),
     },
     {
+      title: '借用状态',
+      key: 'borrow_status',
+      render: (_: unknown, record: BorrowRequestItem) => {
+        if (record.request_status === 'approved') {
+          return <Tag color="green">已确认</Tag>;
+        }
+        if (record.request_status === 'cancelled' || record.request_status === 'canceled') {
+          return <Tag color="volcano">已取消</Tag>;
+        }
+        return <Tag color="gold">待处理</Tag>;
+      },
+    },
+    {
       title: '操作',
       key: 'actions',
       render: (_: unknown, record: BorrowRequestItem) => {
         const isPending = record.request_status === 'pending';
-        const statusLabel = record.request_status === 'approved' ? '已确认' : '已取消';
-        const statusColor = record.request_status === 'approved' ? 'green' : 'volcano';
         return (
           <Space wrap>
             <Button size="small" onClick={() => setRequestDetail(record)}>
               详情
+            </Button>
+            <Button
+              size="small"
+              onClick={() => {
+                const deviceQuery = String(record.device_model || '').trim();
+                setActiveMenu('devices');
+                setQuery(deviceQuery);
+                setAiReason('');
+                setDevicePage(1);
+                loadDevices(deviceQuery);
+              }}
+            >
+              设备
             </Button>
             <Button size="small" type="primary" disabled={!isPending} onClick={() => handleApproveRequest(record)}>
               确认
@@ -1414,7 +1447,6 @@ export default function AdminApp() {
             <Button size="small" danger disabled={!isPending} onClick={() => handleCancelRequest(record)}>
               取消
             </Button>
-            {!isPending ? <Tag color={statusColor}>{statusLabel}</Tag> : null}
           </Space>
         );
       },

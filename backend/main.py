@@ -241,11 +241,12 @@ def _fetch_devices(conn, query: Optional[str] = None) -> List[Dict[str, Any]]:
     if query:
         like = f"%{query}%"
         sql += (
-            "WHERE d.model LIKE ? OR d.status LIKE ? OR d.type LIKE ? OR v.name LIKE ? "
+            "WHERE CAST(d.id AS TEXT) LIKE ? OR d.model LIKE ? OR d.status LIKE ? OR d.type LIKE ? OR v.name LIKE ? "
             "OR s.name LIKE ? OR sv.version LIKE ? OR d.resolution LIKE ? OR d.arch LIKE ? "
             "OR d.cpu LIKE ? OR d.notes LIKE ? OR d.borrower_name LIKE ? "
         )
         params = [
+            like,
             like,
             like,
             like,

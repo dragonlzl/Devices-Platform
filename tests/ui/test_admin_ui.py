@@ -58,7 +58,9 @@ def seed_borrow_request(base_url):
                 "system_version_id": version_id,
             },
         )
-        device_id = client.get("/api/devices").json()["items"][0]["id"]
+        device = client.get("/api/devices").json()["items"][0]
+        device_id = device["id"]
+        device_model = device["model"]
         future_time = datetime.now(timezone.utc) + timedelta(days=1)
         client.post(
             f"/api/devices/{device_id}/borrow",
@@ -67,6 +69,7 @@ def seed_borrow_request(base_url):
                 "expected_return_at": future_time.isoformat(),
             },
         )
+        return device_model
 
 
 def seed_performance_devices(base_url):
@@ -162,6 +165,51 @@ def seed_status_devices(base_url):
         )
 
 
+def create_pending_request(base_url, model_name):
+    with httpx.Client(base_url=base_url) as client:
+        vendors = client.get("/api/vendors").json()["items"]
+        vendor = next((item for item in vendors if item["name"] == "AutoPendingVendor"), None)
+        if not vendor:
+            client.post("/api/vendors", json={"name": "AutoPendingVendor"})
+            vendors = client.get("/api/vendors").json()["items"]
+            vendor = next(item for item in vendors if item["name"] == "AutoPendingVendor")
+        vendor_id = vendor["id"]
+
+        systems = client.get("/api/systems?include_versions=1").json()["items"]
+        system = next((item for item in systems if item["name"] == "AutoPendingOS"), None)
+        if not system:
+            client.post("/api/systems", json={"name": "AutoPendingOS"})
+            systems = client.get("/api/systems?include_versions=1").json()["items"]
+            system = next(item for item in systems if item["name"] == "AutoPendingOS")
+        system_id = system["id"]
+        versions = system.get("versions") or []
+        if not versions:
+            client.post(f"/api/systems/{system_id}/versions", json={"version": "1.0"})
+            systems = client.get("/api/systems?include_versions=1").json()["items"]
+            system = next(item for item in systems if item["name"] == "AutoPendingOS")
+            versions = system.get("versions") or []
+        version_id = versions[0]["id"]
+        client.post(
+            "/api/devices",
+            json={
+                "model": model_name,
+                "status": "正常",
+                "type": "手机",
+                "vendor_id": vendor_id,
+                "system_id": system_id,
+                "system_version_id": version_id,
+            },
+        )
+        device_id = client.get("/api/devices").json()["items"][0]["id"]
+        future_time = datetime.now(timezone.utc) + timedelta(days=1)
+        client.post(
+            f"/api/devices/{device_id}/borrow",
+            json={
+                "borrower_name": "AutoPendingUser",
+                "expected_return_at": future_time.isoformat(),
+            },
+        )
+
 
 def test_admin_add_device_validation(page, base_url):
     page.goto(f"{base_url}/admin")
@@ -196,12 +244,18 @@ def test_admin_ai_mode_persist(page, base_url):
 
 
 def test_admin_pending_request_flow(page, base_url):
-    seed_borrow_request(base_url)
+    device_model = seed_borrow_request(base_url)
     page.goto(f"{base_url}/admin")
     expect(page.locator(".ant-menu .ant-badge-count")).to_have_text("1")
     page.get_by_role("menuitem", name="待处理").click()
     row = page.locator("tr", has_text="PendingPhone").first
     expect(row).to_be_visible()
+    row.get_by_role("button", name="设备").click()
+    query_input = page.get_by_placeholder("输入型号/系统/厂商等关键词")
+    expect(query_input).to_have_value(device_model)
+    expect(page.locator("tbody tr", has_text="PendingPhone").first).to_be_visible()
+    page.get_by_role("menuitem", name="待处理").click()
+    row = page.locator("tr", has_text="PendingPhone").first
     row.get_by_role("button", name="确认").click()
     notice = page.locator(".ant-message-notice").first
     expect(notice).to_contain_text("确认借出成功")
@@ -239,6 +293,18 @@ def test_admin_status_sort_normal_first(page, base_url):
 
     page.get_by_role("columnheader", name="设备状态").click()
     expect(rows.nth(0)).to_contain_text("Status-Normal")
+
+
+def test_admin_pending_auto_refresh(page, base_url):
+    page.goto(f"{base_url}/admin")
+    page.get_by_role("menuitem", name="待处理").click()
+    search_input = page.get_by_placeholder("搜索待处理通知")
+    search_input.fill("AutoPendingPhone")
+    page.get_by_role("button", name="搜索").click()
+    expect(page.locator("tr", has_text="AutoPendingPhone")).to_have_count(0)
+
+    create_pending_request(base_url, "AutoPendingPhone")
+    expect(page.locator("tr", has_text="AutoPendingPhone").first).to_be_visible(timeout=10000)
 
 
 def test_admin_device_form_quick_add_buttons(page, base_url):

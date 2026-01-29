@@ -194,3 +194,24 @@ def test_version_rebind_on_delete(client):
 
     devices = client.get("/api/devices").json()["items"]
     assert devices[0]["system_version"] == "18.0"
+
+
+def test_device_query_by_id(client):
+    vendor_id, system_id, version_id = create_vendor_system_version(client)
+    client.post(
+        "/api/devices",
+        json={
+            "model": "QueryPhone",
+            "status": "正常",
+            "type": "手机",
+            "vendor_id": vendor_id,
+            "system_id": system_id,
+            "system_version_id": version_id,
+        },
+    )
+    device_id = client.get("/api/devices").json()["items"][0]["id"]
+    resp = client.get(f"/api/devices?query={device_id}")
+    assert resp.status_code == 200
+    items = resp.json()["items"]
+    assert len(items) == 1
+    assert items[0]["id"] == device_id
