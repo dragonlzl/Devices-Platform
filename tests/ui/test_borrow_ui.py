@@ -92,6 +92,8 @@ def test_borrow_flow(page, base_url):
 
     row.get_by_role("button", name="可借用").click()
     page.get_by_label("借用人名字").fill("Tester")
+    page.get_by_label("预计归还时间").click()
+    expect(page.get_by_text("今天")).to_be_visible()
 
     future_time = datetime.now() + timedelta(days=1)
     time_str = future_time.strftime("%Y-%m-%dT%H:%M:%S")
