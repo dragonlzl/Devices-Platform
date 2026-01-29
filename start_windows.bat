@@ -24,6 +24,7 @@ if not exist "%ROOT_DIR%\backend\main.py" (
   echo 请将 start_windows.bat 放在项目根目录，或传入项目路径:
   echo   start_windows.bat [PORT] [DB_FILE] [PROJECT_DIR]
   echo 或设置环境变量 PHONETOOL_HOME。
+  pause
   exit /b 1
 )
 :root_found
@@ -42,6 +43,7 @@ if exist "%REQUIREMENTS%" (
   python -m pip install -r "%REQUIREMENTS%"
   if errorlevel 1 (
     echo Failed to install requirements.
+    pause
     popd
     exit /b 1
   )
@@ -53,6 +55,9 @@ set APP_DB_FILE=%DB_FILE%
 echo Starting API on port %PORT% using %DB_FILE%
 
 python -m uvicorn backend.main:app --host 0.0.0.0 --port %PORT%
+set EXIT_CODE=%ERRORLEVEL%
+if not "%EXIT_CODE%"=="0" pause
 
 popd
 endlocal
+exit /b %EXIT_CODE%
