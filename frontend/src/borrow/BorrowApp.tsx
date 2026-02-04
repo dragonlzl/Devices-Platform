@@ -657,6 +657,11 @@ export default function BorrowApp() {
 
   useEffect(() => {
     if (!assignmentsReady) return;
+    if (!aiMode && canSelectFast) {
+      setAiMode('fast');
+      localStorage.setItem('ai_search_mode', 'fast');
+      return;
+    }
     if (aiMode === 'fast' && !canSelectFast) {
       setAiMode(null);
       localStorage.removeItem('ai_search_mode');
@@ -703,7 +708,7 @@ export default function BorrowApp() {
                   }}
                   disabled={aiLoading}
                 >
-                  搜索
+                  普通搜索
                 </Button>
                 <Button.Group className="ai-mode-group">
                   <Button
