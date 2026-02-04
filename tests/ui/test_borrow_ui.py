@@ -104,6 +104,19 @@ def test_borrow_flow(page, base_url):
     expect(notice).to_contain_text("已通知管理员")
     expect(page.locator("tr", has_text="BorrowPhone")).to_contain_text("待借出")
 
+    row.get_by_role("button", name="换借用人").click()
+    page.get_by_label("借用人名字").fill("Tester-2")
+    new_time = (datetime.now() + timedelta(days=2)).strftime("%Y-%m-%dT%H:%M:%S")
+    page.get_by_label("预计归还时间").fill(new_time)
+    page.get_by_role("button", name="确认").click()
+    notice = page.locator(".ant-message-notice").first
+    expect(notice).to_contain_text("已发送通知到管理员")
+    expect(page.locator("tr", has_text="BorrowPhone")).to_contain_text("Tester")
+
+    row.get_by_role("button", name="换借用人").click()
+    notice = page.locator(".ant-message-notice").first
+    expect(notice).to_contain_text("当前设备已有借用人更换申请，需等待管理员处理")
+
 
 def test_borrow_sort_resets_page(page, base_url):
     seed_devices(base_url, total=21)

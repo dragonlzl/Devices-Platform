@@ -1367,8 +1367,10 @@ export default function AdminApp() {
 
   const handleApproveRequest = async (record: BorrowRequestItem) => {
     try {
-      await apiRequest(`/api/borrow-requests/${record.id}/approve`, { method: 'POST' });
-      message.success('确认借出成功');
+      const res = await apiRequest<{ message?: string }>(`/api/borrow-requests/${record.id}/approve`, {
+        method: 'POST',
+      });
+      message.success(res.message || (record.request_type === 'change' ? '借用人变更成功' : '确认借出成功'));
       loadBorrowRequests(pendingQuery.trim() || undefined);
       loadDevices();
       loadBorrowRecords(recordsQuery.trim() || undefined);
@@ -1395,7 +1397,8 @@ export default function AdminApp() {
       title: '类型',
       dataIndex: 'request_type',
       key: 'request_type',
-      render: () => <Tag color="blue">借用</Tag>,
+      render: (value: string) =>
+        value === 'change' ? <Tag color="purple">借用变更</Tag> : <Tag color="blue">借用</Tag>,
     },
     { title: '申请人', dataIndex: 'borrower_name', key: 'borrower_name', align: 'center' as const },
     { title: '设备型号', dataIndex: 'device_model', key: 'device_model' },
@@ -1455,6 +1458,28 @@ export default function AdminApp() {
 
   const recordColumns = [
     { title: '借用人', dataIndex: 'borrower_name', key: 'borrower_name', align: 'center' as const },
+    {
+      title: '借用人变更',
+      key: 'borrower_changes',
+      render: (_: unknown, record: BorrowRecord) => {
+        const changes = record.borrower_changes || [];
+        if (!changes.length) {
+          return '-';
+        }
+        return (
+          <Space direction="vertical" size={2}>
+            {changes.map((change, index) => (
+              <div key={change.id ?? index}>
+                <div>
+                  {(change.borrower_before || '-') + ' → ' + (change.borrower_after || '-')}
+                </div>
+                <div className="muted">{formatDateTime(change.changed_at)}</div>
+              </div>
+            ))}
+          </Space>
+        );
+      },
+    },
     { title: '设备型号', dataIndex: 'device_model', key: 'device_model' },
     {
       title: '借用时间',
@@ -2253,7 +2278,7 @@ export default function AdminApp() {
       >
         <Space direction="vertical" size={10} style={{ width: '100%' }}>
           <Typography.Text strong>类型</Typography.Text>
-          <Typography.Text>借用</Typography.Text>
+          <Typography.Text>{requestDetail?.request_type === 'change' ? '借用变更' : '借用'}</Typography.Text>
           <Typography.Text strong>申请人</Typography.Text>
           <Typography.Text>{requestDetail?.borrower_name || '-'}</Typography.Text>
           <Typography.Text strong>设备型号</Typography.Text>

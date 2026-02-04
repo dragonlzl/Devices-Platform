@@ -307,6 +307,76 @@ def test_admin_pending_auto_refresh(page, base_url):
     expect(page.locator("tr", has_text="AutoPendingPhone").first).to_be_visible(timeout=10000)
 
 
+def seed_record_with_change(base_url):
+    with httpx.Client(base_url=base_url) as client:
+        vendors = client.get("/api/vendors").json()["items"]
+        vendor = next((item for item in vendors if item["name"] == "ChangeVendor"), None)
+        if not vendor:
+            client.post("/api/vendors", json={"name": "ChangeVendor"})
+            vendors = client.get("/api/vendors").json()["items"]
+            vendor = next(item for item in vendors if item["name"] == "ChangeVendor")
+        vendor_id = vendor["id"]
+
+        systems = client.get("/api/systems?include_versions=1").json()["items"]
+        system = next((item for item in systems if item["name"] == "ChangeOS"), None)
+        if not system:
+            client.post("/api/systems", json={"name": "ChangeOS"})
+            systems = client.get("/api/systems?include_versions=1").json()["items"]
+            system = next(item for item in systems if item["name"] == "ChangeOS")
+        system_id = system["id"]
+        versions = system.get("versions") or []
+        if not versions:
+            client.post(f"/api/systems/{system_id}/versions", json={"version": "1.0"})
+            systems = client.get("/api/systems?include_versions=1").json()["items"]
+            system = next(item for item in systems if item["name"] == "ChangeOS")
+            versions = system.get("versions") or []
+        version_id = versions[0]["id"]
+        client.post(
+            "/api/devices",
+            json={
+                "model": "ChangePhone",
+                "status": "正常",
+                "type": "手机",
+                "vendor_id": vendor_id,
+                "system_id": system_id,
+                "system_version_id": version_id,
+            },
+        )
+        device_id = client.get("/api/devices").json()["items"][0]["id"]
+        future_time = datetime.now(timezone.utc) + timedelta(days=1)
+        client.post(
+            f"/api/devices/{device_id}/borrow",
+            json={
+                "borrower_name": "Alice",
+                "expected_return_at": future_time.isoformat(),
+            },
+        )
+        request_id = client.get("/api/borrow-requests").json()["items"][0]["id"]
+        client.post(f"/api/borrow-requests/{request_id}/approve")
+        later_time = datetime.now(timezone.utc) + timedelta(days=2)
+        client.post(
+            f"/api/devices/{device_id}/change-borrower",
+            json={
+                "borrower_name": "Bob",
+                "expected_return_at": later_time.isoformat(),
+            },
+        )
+        change_request = next(
+            item for item in client.get("/api/borrow-requests").json()["items"] if item["request_type"] == "change"
+        )
+        client.post(f"/api/borrow-requests/{change_request['id']}/approve")
+
+
+def test_admin_borrow_record_change_display(page, base_url):
+    seed_record_with_change(base_url)
+    page.goto(f"{base_url}/admin")
+    page.get_by_role("menuitem", name="借用记录").click()
+    expect(page.get_by_role("columnheader", name="借用人变更")).to_be_visible()
+    row = page.locator("tr", has_text="ChangePhone").first
+    expect(row).to_contain_text("Alice")
+    expect(row).to_contain_text("Bob")
+
+
 def test_admin_device_form_quick_add_buttons(page, base_url):
     page.goto(f"{base_url}/admin")
     page.get_by_role("button", name="添加设备").click()

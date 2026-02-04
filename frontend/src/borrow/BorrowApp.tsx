@@ -24,7 +24,7 @@ import {
 } from '@ant-design/icons';
 import dayjs, { Dayjs } from 'dayjs';
 import { apiRequest } from '../shared/api';
-import { Device, LLMModel, LLMModelAssignments } from '../shared/types';
+import { BorrowRequestItem, Device, LLMModel, LLMModelAssignments } from '../shared/types';
 import {
   extractPerformance,
   formatDateTime,
@@ -95,6 +95,67 @@ function BorrowDrawer(props: {
           }}
         >
           确认借用
+        </Button>
+      </div>
+    </Drawer>
+  );
+}
+
+function ChangeBorrowerDrawer(props: {
+  open: boolean;
+  device: Device | null;
+  onCancel: () => void;
+  onConfirm: (borrower: string, expected: Dayjs) => void;
+}) {
+  const [form] = Form.useForm();
+
+  useEffect(() => {
+    if (!props.open) return;
+    form.setFieldsValue({
+      borrower: props.device?.borrower_name || '',
+      expected: toDayjs(props.device?.expected_return_at) || undefined,
+    });
+  }, [props.open, props.device, form]);
+
+  return (
+    <Drawer
+      open={props.open}
+      onClose={props.onCancel}
+      width={420}
+      title={`变更借用人 ${props.device?.model || ''}`}
+    >
+      <Form layout="vertical" form={form}>
+        <Form.Item
+          label="借用人名字"
+          name="borrower"
+          rules={[{ required: true, message: '借用人不能为空' }]}
+        >
+          <Input placeholder="输入借用人名字" />
+        </Form.Item>
+        <Form.Item
+          label="预计归还时间"
+          name="expected"
+          rules={[{ required: true, message: '请选择预计归还时间' }]}
+        >
+          <DatePicker
+            showTime
+            style={{ width: '100%' }}
+            disabledDate={(current) => current && current < dayjs().startOf('day')}
+          />
+        </Form.Item>
+      </Form>
+      <div className="drawer-footer">
+        <Button onClick={props.onCancel}>取消</Button>
+        <Button
+          type="primary"
+          onClick={() => {
+            form
+              .validateFields()
+              .then((values) => props.onConfirm(values.borrower, values.expected))
+              .catch(() => message.error('请填写借用信息'));
+          }}
+        >
+          确认
         </Button>
       </div>
     </Drawer>
@@ -178,6 +239,7 @@ export default function BorrowApp() {
   const [query, setQuery] = useState('');
   const [aiReason, setAiReason] = useState('');
   const [borrowDevice, setBorrowDevice] = useState<Device | null>(null);
+  const [changeBorrowDevice, setChangeBorrowDevice] = useState<Device | null>(null);
   const [extendDevice, setExtendDevice] = useState<Device | null>(null);
   const [detailDevice, setDetailDevice] = useState<Device | null>(null);
   const [sortState, setSortState] = useState<{ key: string; order: SortOrder } | null>({
@@ -236,6 +298,21 @@ export default function BorrowApp() {
       message.error((err as Error).message);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleOpenChangeBorrower = async (record: Device) => {
+    try {
+      const res = await apiRequest<{ items: BorrowRequestItem[] }>(
+        `/api/borrow-requests?status=pending&device_id=${record.id}&request_type=change`
+      );
+      if ((res.items || []).length > 0) {
+        message.warning('当前设备已有借用人更换申请，需等待管理员处理。');
+        return;
+      }
+      setChangeBorrowDevice(record);
+    } catch (err) {
+      message.error((err as Error).message);
     }
   };
 
@@ -424,7 +501,25 @@ export default function BorrowApp() {
         </Button>
       ),
     },
-    { title: '借用人', dataIndex: 'borrower_name', key: 'borrower_name', align: 'center' as const },
+    {
+      title: '借用人',
+      dataIndex: 'borrower_name',
+      key: 'borrower_name',
+      align: 'center' as const,
+      render: (_: string, record: Device) => {
+        const borrower = record.borrower_name?.trim();
+        return (
+          <Space direction="vertical" size={4} align="center">
+            <span>{borrower || '-'}</span>
+            {borrower ? (
+              <Button size="small" onClick={() => handleOpenChangeBorrower(record)}>
+                换借用人
+              </Button>
+            ) : null}
+          </Space>
+        );
+      },
+    },
     {
       title: '借用时间',
       dataIndex: 'borrowed_at',
@@ -747,6 +842,31 @@ export default function BorrowApp() {
                 message.success({ content: '已通知管理员，请前往管理员出借用设备', duration: 8 });
                 setBorrowDevice(null);
                 loadDevices();
+              } catch (err) {
+                message.error((err as Error).message);
+              }
+            }}
+          />
+
+          <ChangeBorrowerDrawer
+            open={Boolean(changeBorrowDevice)}
+            device={changeBorrowDevice}
+            onCancel={() => setChangeBorrowDevice(null)}
+            onConfirm={async (borrower, expected) => {
+              if (!changeBorrowDevice) return;
+              const iso = toISOString(expected);
+              if (!iso) {
+                message.error('请选择预计归还时间');
+                return;
+              }
+              try {
+                await apiRequest(`/api/devices/${changeBorrowDevice.id}/change-borrower`, {
+                  method: 'POST',
+                  body: { borrower_name: borrower.trim(), expected_return_at: iso },
+                });
+                message.success({ content: '已发送通知到管理员，请等待管理员确认操作。', duration: 5 });
+                setChangeBorrowDevice(null);
+                loadDevices(query.trim() || undefined);
               } catch (err) {
                 message.error((err as Error).message);
               }

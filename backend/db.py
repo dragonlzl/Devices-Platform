@@ -125,6 +125,23 @@ def init_db() -> None:
                 FOREIGN KEY (request_id) REFERENCES borrow_requests(id)
             );
 
+            CREATE TABLE IF NOT EXISTS borrow_changes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                device_id INTEGER NOT NULL,
+                record_id INTEGER,
+                request_id INTEGER,
+                borrower_before TEXT,
+                borrower_after TEXT,
+                expected_before TEXT,
+                expected_after TEXT,
+                changed_at TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY (device_id) REFERENCES devices(id),
+                FOREIGN KEY (record_id) REFERENCES borrow_records(id),
+                FOREIGN KEY (request_id) REFERENCES borrow_requests(id)
+            );
+
             CREATE TABLE IF NOT EXISTS llm_models (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,

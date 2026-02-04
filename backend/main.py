@@ -16,6 +16,7 @@ from .llm import LLMError, call_llm
 from .notify import NotifyError, send_feishu_message
 from .schemas import (
     BorrowRequest,
+    BorrowerChangeRequest,
     DeviceCreate,
     DeviceUpdate,
     ExtendRequest,
@@ -265,7 +266,11 @@ def _fetch_devices(conn, query: Optional[str] = None) -> List[Dict[str, Any]]:
 
 
 def _fetch_borrow_requests(
-    conn, query: Optional[str] = None, status: Optional[str] = None
+    conn,
+    query: Optional[str] = None,
+    status: Optional[str] = None,
+    device_id: Optional[int] = None,
+    request_type: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     sql = (
         "SELECT "
@@ -289,6 +294,12 @@ def _fetch_borrow_requests(
     if status:
         conditions.append("br.status = ?")
         params.append(status)
+    if device_id is not None:
+        conditions.append("br.device_id = ?")
+        params.append(device_id)
+    if request_type:
+        conditions.append("br.request_type = ?")
+        params.append(request_type)
     if conditions:
         sql += "WHERE " + " AND ".join(conditions) + " "
     sql += "ORDER BY br.requested_at DESC"
@@ -299,7 +310,7 @@ def _fetch_borrow_requests(
 def _fetch_borrow_records(conn, query: Optional[str] = None) -> List[Dict[str, Any]]:
     sql = (
         "SELECT id, device_id, device_model, borrower_name, borrowed_at, expected_return_at, "
-        "returned_at, status "
+        "returned_at, status, request_id "
         "FROM borrow_records "
     )
     params: List[Any] = []
@@ -309,7 +320,47 @@ def _fetch_borrow_records(conn, query: Optional[str] = None) -> List[Dict[str, A
         params = [like, like, like]
     sql += "ORDER BY borrowed_at DESC"
     rows = conn.execute(sql, params).fetchall()
-    return [dict(row) for row in rows]
+    items = [dict(row) for row in rows]
+    if not items:
+        return items
+    record_ids = [item["id"] for item in items if item.get("id") is not None]
+    request_ids = [item["request_id"] for item in items if item.get("request_id") is not None]
+    if not record_ids and not request_ids:
+        return items
+    conditions = []
+    params: List[Any] = []
+    if record_ids:
+        placeholders = ",".join("?" for _ in record_ids)
+        conditions.append(f"record_id IN ({placeholders})")
+        params.extend(record_ids)
+    if request_ids:
+        placeholders = ",".join("?" for _ in request_ids)
+        conditions.append(f"request_id IN ({placeholders})")
+        params.extend(request_ids)
+    sql = (
+        "SELECT id, record_id, request_id, borrower_before, borrower_after, expected_before, "
+        "expected_after, changed_at FROM borrow_changes "
+    )
+    if conditions:
+        sql += "WHERE " + " OR ".join(conditions) + " "
+    sql += "ORDER BY changed_at ASC"
+    change_rows = conn.execute(sql, params).fetchall()
+    change_by_record: Dict[int, List[Dict[str, Any]]] = {}
+    change_by_request: Dict[int, List[Dict[str, Any]]] = {}
+    for row in change_rows:
+        data = dict(row)
+        if row["record_id"] is not None:
+            change_by_record.setdefault(row["record_id"], []).append(data)
+        if row["request_id"] is not None:
+            change_by_request.setdefault(row["request_id"], []).append(data)
+    for item in items:
+        record_list = change_by_record.get(item["id"], [])
+        request_list = change_by_request.get(item.get("request_id"), [])
+        if record_list or request_list:
+            item["borrower_changes"] = record_list + [c for c in request_list if c not in record_list]
+        else:
+            item["borrower_changes"] = []
+    return items
 
 
 def _filter_ai_devices(devices: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -788,6 +839,69 @@ async def extend_device(device_id: int, payload: ExtendRequest, background_tasks
     return {"message": "延期成功"}
 
 
+@app.post("/api/devices/{device_id}/change-borrower")
+async def change_borrower(
+    device_id: int, payload: BorrowerChangeRequest, background_tasks: BackgroundTasks
+):
+    _ensure_required(payload.borrower_name, "借用人名字")
+    expected_return = _parse_datetime(payload.expected_return_at)
+    now = datetime.now(timezone.utc)
+    if expected_return <= now:
+        raise HTTPException(status_code=400, detail="预计归还时间必须晚于当前时间")
+    with db_session() as conn:
+        row = conn.execute(
+            "SELECT loan_status, borrower_name, expected_return_at, model FROM devices WHERE id = ?",
+            (device_id,),
+        ).fetchone()
+        if not row:
+            raise HTTPException(status_code=404, detail="设备不存在")
+        if row["loan_status"] not in {"borrowed", "pending"}:
+            raise HTTPException(status_code=400, detail="设备未处于借用状态")
+        if not row["borrower_name"]:
+            raise HTTPException(status_code=400, detail="当前设备无借用人")
+        pending_change = conn.execute(
+            """
+            SELECT id FROM borrow_requests
+            WHERE device_id = ? AND request_type = 'change' AND status = 'pending'
+            LIMIT 1
+            """,
+            (device_id,),
+        ).fetchone()
+        if pending_change:
+            raise HTTPException(status_code=400, detail="当前设备已有借用人更换申请，需等待管理员处理。")
+        old_borrower = row["borrower_name"]
+        old_expected = row["expected_return_at"]
+        request_now = now_iso()
+        conn.execute(
+            """
+            INSERT INTO borrow_requests (
+                device_id, device_model, borrower_name, expected_return_at,
+                request_type, status, requested_at, handled_at, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, 'change', 'pending', ?, NULL, ?, ?)
+            """,
+            (
+                device_id,
+                row["model"],
+                payload.borrower_name.strip(),
+                expected_return.isoformat(),
+                request_now,
+                request_now,
+                request_now,
+            ),
+        )
+    body = (
+        f"设备: {row['model']}\n"
+        f"变更前借用人: {old_borrower or '-'}\n"
+        f"变更前归还时间: {_format_notify_time(old_expected)}\n"
+        f"变更后借用人: {payload.borrower_name.strip()}\n"
+        f"变更后预期归还时间: {_format_notify_time(expected_return)}\n"
+        f"变更时间: {_format_notify_time(now)}"
+    )
+    background_tasks.add_task(_queue_notify, "借用人变更通知", body)
+    return {"message": "已提交借用人变更申请"}
+
+
 @app.post("/api/devices/{device_id}/return")
 async def return_device(device_id: int, background_tasks: BackgroundTasks):
     now = datetime.now(timezone.utc)
@@ -828,11 +942,13 @@ async def return_device(device_id: int, background_tasks: BackgroundTasks):
 async def list_borrow_requests(
     query: Optional[str] = Query(default=None),
     status: Optional[str] = Query(default=None),
+    device_id: Optional[int] = Query(default=None),
+    request_type: Optional[str] = Query(default=None),
 ):
     if status and status not in {"pending", "approved", "cancelled"}:
         raise HTTPException(status_code=400, detail="状态参数不合法")
     with db_session() as conn:
-        items = _fetch_borrow_requests(conn, query, status)
+        items = _fetch_borrow_requests(conn, query, status, device_id, request_type)
     return {"items": items}
 
 
@@ -850,50 +966,164 @@ async def approve_borrow_request(request_id: int, background_tasks: BackgroundTa
         if request["status"] != "pending":
             raise HTTPException(status_code=400, detail="申请已处理")
         device = conn.execute(
-            "SELECT loan_status, model FROM devices WHERE id = ?",
+            "SELECT loan_status, model, borrower_name, expected_return_at FROM devices WHERE id = ?",
             (request["device_id"],),
         ).fetchone()
         if not device:
             raise HTTPException(status_code=404, detail="设备不存在")
-        if device["loan_status"] != "pending":
-            raise HTTPException(status_code=400, detail="设备状态异常")
-        borrowed_at = now_iso()
-        conn.execute(
-            """
-            UPDATE devices SET
-                loan_status = 'borrowed',
-                borrower_name = ?,
-                borrowed_at = ?,
-                expected_return_at = ?,
-                overdue_notified = 0,
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (
+
+        if request["request_type"] == "change":
+            if device["loan_status"] not in {"borrowed", "pending"}:
+                raise HTTPException(status_code=400, detail="设备状态异常")
+            old_borrower = device["borrower_name"]
+            old_expected = device["expected_return_at"]
+            conn.execute(
+                """
+                UPDATE devices SET
+                    borrower_name = ?,
+                    expected_return_at = ?,
+                    overdue_notified = 0,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    request["borrower_name"],
+                    request["expected_return_at"],
+                    now_iso(),
+                    request["device_id"],
+                ),
+            )
+            record_row = conn.execute(
+                """
+                SELECT id FROM borrow_records
+                WHERE device_id = ? AND returned_at IS NULL
+                ORDER BY borrowed_at DESC
+                LIMIT 1
+                """,
+                (request["device_id"],),
+            ).fetchone()
+            record_id = record_row["id"] if record_row else None
+            change_request_id = request_id
+            borrow_request_id = None
+            if device["loan_status"] == "pending":
+                borrow_request = conn.execute(
+                    """
+                    SELECT id FROM borrow_requests
+                    WHERE device_id = ? AND request_type = 'borrow' AND status = 'pending'
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (request["device_id"],),
+                ).fetchone()
+                if borrow_request:
+                    borrow_request_id = borrow_request["id"]
+                    conn.execute(
+                        """
+                        UPDATE borrow_requests
+                        SET borrower_name = ?, expected_return_at = ?, updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            request["borrower_name"],
+                            request["expected_return_at"],
+                            now_iso(),
+                            borrow_request_id,
+                        ),
+                    )
+            if record_id:
+                conn.execute(
+                    """
+                    UPDATE borrow_records
+                    SET borrower_name = ?, expected_return_at = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        request["borrower_name"],
+                        request["expected_return_at"],
+                        now_iso(),
+                        record_id,
+                    ),
+                )
+            if record_id or borrow_request_id:
+                now_str = now_iso()
+                conn.execute(
+                    """
+                    INSERT INTO borrow_changes (
+                        device_id, record_id, request_id, borrower_before, borrower_after,
+                        expected_before, expected_after, changed_at, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        request["device_id"],
+                        record_id,
+                        borrow_request_id or change_request_id,
+                        old_borrower,
+                        request["borrower_name"],
+                        old_expected,
+                        request["expected_return_at"],
+                        now_str,
+                        now_str,
+                        now_str,
+                    ),
+                )
+            conn.execute(
+                """
+                UPDATE borrow_requests
+                SET status = 'approved', handled_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (now_iso(), now_iso(), request_id),
+            )
+        else:
+            if device["loan_status"] != "pending":
+                raise HTTPException(status_code=400, detail="设备状态异常")
+            borrowed_at = now_iso()
+            conn.execute(
+                """
+                UPDATE devices SET
+                    loan_status = 'borrowed',
+                    borrower_name = ?,
+                    borrowed_at = ?,
+                    expected_return_at = ?,
+                    overdue_notified = 0,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    request["borrower_name"],
+                    borrowed_at,
+                    request["expected_return_at"],
+                    now_iso(),
+                    request["device_id"],
+                ),
+            )
+            conn.execute(
+                """
+                UPDATE borrow_requests
+                SET status = 'approved', handled_at = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (borrowed_at, now_iso(), request_id),
+            )
+            _insert_borrow_record(
+                conn,
+                request["device_id"],
+                request["device_model"],
                 request["borrower_name"],
                 borrowed_at,
                 request["expected_return_at"],
-                now_iso(),
-                request["device_id"],
-            ),
+                request_id,
+            )
+
+    if request["request_type"] == "change":
+        body = (
+            f"设备: {request['device_model']}\n"
+            f"新的借用人名字: {request['borrower_name']}\n"
+            f"新的归还时间: {_format_notify_time(request['expected_return_at'])}"
         )
-        conn.execute(
-            """
-            UPDATE borrow_requests
-            SET status = 'approved', handled_at = ?, updated_at = ?
-            WHERE id = ?
-            """,
-            (borrowed_at, now_iso(), request_id),
-        )
-        _insert_borrow_record(
-            conn,
-            request["device_id"],
-            request["device_model"],
-            request["borrower_name"],
-            borrowed_at,
-            request["expected_return_at"],
-            request_id,
-        )
+        background_tasks.add_task(_queue_notify, "借用人变更成功通知", body)
+        return {"message": "借用人变更成功"}
+
     body = (
         f"借用人名字: {request['borrower_name']}\n"
         f"借用的设备型号: {request['device_model']}\n"
@@ -925,19 +1155,20 @@ async def cancel_borrow_request(request_id: int):
             """,
             (now, now_iso(), request_id),
         )
-        conn.execute(
-            """
-            UPDATE devices SET
-                loan_status = 'available',
-                borrower_name = NULL,
-                borrowed_at = NULL,
-                expected_return_at = NULL,
-                overdue_notified = 0,
-                updated_at = ?
-            WHERE id = ?
-            """,
-            (now_iso(), request["device_id"]),
-        )
+        if request["request_type"] != "change":
+            conn.execute(
+                """
+                UPDATE devices SET
+                    loan_status = 'available',
+                    borrower_name = NULL,
+                    borrowed_at = NULL,
+                    expected_return_at = NULL,
+                    overdue_notified = 0,
+                    updated_at = ?
+                WHERE id = ?
+                """,
+                (now_iso(), request["device_id"]),
+            )
     return {"message": "取消成功"}
 
 

@@ -68,6 +68,19 @@ export interface BorrowRecord {
   expected_return_at: string | null;
   returned_at: string | null;
   status: string;
+  request_id: number | null;
+  borrower_changes?: BorrowerChangeRecord[];
+}
+
+export interface BorrowerChangeRecord {
+  id: number;
+  record_id: number | null;
+  request_id: number | null;
+  borrower_before: string | null;
+  borrower_after: string | null;
+  expected_before: string | null;
+  expected_after: string | null;
+  changed_at: string;
 }
 
 export interface LLMModel {

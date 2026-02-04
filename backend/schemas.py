@@ -64,6 +64,11 @@ class ExtendRequest(BaseModel):
     expected_return_at: str = Field(..., min_length=1)
 
 
+class BorrowerChangeRequest(BaseModel):
+    borrower_name: str = Field(..., min_length=1)
+    expected_return_at: str = Field(..., min_length=1)
+
+
 class VendorDeleteRequest(BaseModel):
     rebind_vendor_id: Optional[int] = None
 

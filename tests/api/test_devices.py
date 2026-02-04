@@ -215,3 +215,161 @@ def test_device_query_by_id(client):
     items = resp.json()["items"]
     assert len(items) == 1
     assert items[0]["id"] == device_id
+
+
+def test_change_borrower_updates_request(client):
+    vendor_id, system_id, version_id = create_vendor_system_version(client)
+    client.post(
+        "/api/devices",
+        json={
+            "model": "ChangeBorrowerPhone",
+            "status": "正常",
+            "type": "手机",
+            "vendor_id": vendor_id,
+            "system_id": system_id,
+            "system_version_id": version_id,
+        },
+    )
+    device = client.get("/api/devices").json()["items"][0]
+    device_id = device["id"]
+    borrow = client.post(
+        f"/api/devices/{device_id}/borrow",
+        json={
+            "borrower_name": "Alice",
+            "expected_return_at": "2099-12-31T10:00:00+00:00",
+        },
+    )
+    assert borrow.status_code == 200
+    request_id = client.get("/api/borrow-requests").json()["items"][0]["id"]
+    approve = client.post(f"/api/borrow-requests/{request_id}/approve")
+    assert approve.status_code == 200
+
+    change = client.post(
+        f"/api/devices/{device_id}/change-borrower",
+        json={
+            "borrower_name": "Bob",
+            "expected_return_at": "2099-12-31T12:00:00+00:00",
+        },
+    )
+    assert change.status_code == 200
+    device = client.get("/api/devices").json()["items"][0]
+    assert device["borrower_name"] == "Alice"
+    change_request = next(
+        item for item in client.get("/api/borrow-requests").json()["items"] if item["request_type"] == "change"
+    )
+    approve_change = client.post(f"/api/borrow-requests/{change_request['id']}/approve")
+    assert approve_change.status_code == 200
+
+    updated = client.get("/api/devices").json()["items"][0]
+    assert updated["borrower_name"] == "Bob"
+    assert updated["expected_return_at"] == "2099-12-31T12:00:00+00:00"
+
+    records = client.get("/api/borrow-records").json()["items"]
+    assert records
+    changes = records[0].get("borrower_changes", [])
+    assert len(changes) == 1
+    assert changes[0]["borrower_before"] == "Alice"
+    assert changes[0]["borrower_after"] == "Bob"
+
+
+def test_change_borrower_cancel_does_not_reset_device(client):
+    vendor_id, system_id, version_id = create_vendor_system_version(client)
+    client.post(
+        "/api/devices",
+        json={
+            "model": "ChangeBorrowerCancelPhone",
+            "status": "正常",
+            "type": "手机",
+            "vendor_id": vendor_id,
+            "system_id": system_id,
+            "system_version_id": version_id,
+        },
+    )
+    device = client.get("/api/devices").json()["items"][0]
+    device_id = device["id"]
+    borrow = client.post(
+        f"/api/devices/{device_id}/borrow",
+        json={
+            "borrower_name": "Alice",
+            "expected_return_at": "2099-12-31T10:00:00+00:00",
+        },
+    )
+    assert borrow.status_code == 200
+    request_id = client.get("/api/borrow-requests").json()["items"][0]["id"]
+    approve = client.post(f"/api/borrow-requests/{request_id}/approve")
+    assert approve.status_code == 200
+
+    change = client.post(
+        f"/api/devices/{device_id}/change-borrower",
+        json={
+            "borrower_name": "Bob",
+            "expected_return_at": "2099-12-31T12:00:00+00:00",
+        },
+    )
+    assert change.status_code == 200
+    change_request = next(
+        item for item in client.get("/api/borrow-requests").json()["items"] if item["request_type"] == "change"
+    )
+    cancel = client.post(f"/api/borrow-requests/{change_request['id']}/cancel")
+    assert cancel.status_code == 200
+
+    pending = client.get("/api/borrow-requests?status=pending").json()["items"]
+    assert pending == []
+    updated = client.get("/api/devices").json()["items"][0]
+    assert updated["borrower_name"] == "Alice"
+    assert updated["expected_return_at"] == "2099-12-31T10:00:00+00:00"
+    cancelled = next(
+        item for item in client.get("/api/borrow-requests").json()["items"] if item["request_type"] == "change"
+    )
+    assert cancelled["request_status"] == "cancelled"
+
+
+def test_change_borrower_rejected_if_pending_request_exists(client):
+    vendor_id, system_id, version_id = create_vendor_system_version(client)
+    client.post(
+        "/api/devices",
+        json={
+            "model": "ChangeBorrowerBlockPhone",
+            "status": "正常",
+            "type": "手机",
+            "vendor_id": vendor_id,
+            "system_id": system_id,
+            "system_version_id": version_id,
+        },
+    )
+    device = client.get("/api/devices").json()["items"][0]
+    device_id = device["id"]
+    borrow = client.post(
+        f"/api/devices/{device_id}/borrow",
+        json={
+            "borrower_name": "Alice",
+            "expected_return_at": "2099-12-31T10:00:00+00:00",
+        },
+    )
+    assert borrow.status_code == 200
+    request_id = client.get("/api/borrow-requests").json()["items"][0]["id"]
+    approve = client.post(f"/api/borrow-requests/{request_id}/approve")
+    assert approve.status_code == 200
+
+    first_change = client.post(
+        f"/api/devices/{device_id}/change-borrower",
+        json={
+            "borrower_name": "Bob",
+            "expected_return_at": "2099-12-31T12:00:00+00:00",
+        },
+    )
+    assert first_change.status_code == 200
+
+    second_change = client.post(
+        f"/api/devices/{device_id}/change-borrower",
+        json={
+            "borrower_name": "Cindy",
+            "expected_return_at": "2099-12-31T13:00:00+00:00",
+        },
+    )
+    assert second_change.status_code == 400
+    assert "已有借用人更换申请" in second_change.json()["detail"]
+    assert "等待管理员处理" in second_change.json()["detail"]
+
+    pending = client.get("/api/borrow-requests?status=pending&request_type=change").json()["items"]
+    assert len(pending) == 1
