@@ -1097,6 +1097,29 @@ export default function AdminApp() {
     }
   };
 
+  const handleExportBorrowData = async () => {
+    try {
+      const url = query.trim()
+        ? `/api/devices/export?query=${encodeURIComponent(query.trim())}`
+        : '/api/devices/export';
+      const res = await fetch(url);
+      if (!res.ok) {
+        throw new Error(`导出失败: ${res.status}`);
+      }
+      const blob = await res.blob();
+      const link = document.createElement('a');
+      link.href = URL.createObjectURL(blob);
+      link.download = 'borrow_data.xlsx';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(link.href);
+      message.success('导出成功');
+    } catch (err) {
+      message.error((err as Error).message);
+    }
+  };
+
   const updateModelName = (items: LLMModel[]) => {
     const current = items.find((item) => Boolean(item.is_default)) || items[0];
     if (current) {
@@ -1772,6 +1795,7 @@ export default function AdminApp() {
                       >
                         清除
                       </Button>
+                      <Button onClick={handleExportBorrowData}>导出借用数据</Button>
                     </div>
                     <Space>
                       <Typography.Text className="muted">设备总数：{deviceTotal}</Typography.Text>

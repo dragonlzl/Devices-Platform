@@ -1,5 +1,7 @@
 import asyncio
 import json
+import re
+from io import BytesIO
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Union
 
@@ -8,8 +10,9 @@ import os
 from pathlib import Path
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from openpyxl import Workbook
 
 from .db import db_session, init_db, now_iso
 from .llm import LLMError, call_llm
@@ -98,6 +101,31 @@ def _format_notify_time(value: Optional[Union[str, datetime]]) -> str:
     else:
         parsed = _parse_datetime(value)
     return parsed.astimezone(LOCAL_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _format_loan_status(value: Optional[str]) -> str:
+    mapping = {"available": "可借", "pending": "待借", "borrowed": "已借"}
+    if not value:
+        return "-"
+    return mapping.get(value, value)
+
+
+def _extract_performance(notes: Optional[str]) -> str:
+    if not notes:
+        return "-"
+    cleaned = " ".join(notes.split()).strip()
+    if not cleaned:
+        return "-"
+    match = re.search(r"性能[:：=\s]*([^\n,，;；。]+)", cleaned)
+    scope = match.group(1) if match else cleaned
+    keywords = ["强劲", "较高", "一般", "较低", "高", "中", "低", "强", "弱"]
+    for keyword in keywords:
+        if keyword in scope:
+            return keyword
+    if match:
+        value = match.group(1).strip()
+        return value or "-"
+    return "-"
 
 
 def _row_to_dict(row) -> Dict[str, Any]:
@@ -1177,6 +1205,68 @@ async def list_borrow_records(query: Optional[str] = Query(default=None)):
     with db_session() as conn:
         items = _fetch_borrow_records(conn, query)
     return {"items": items}
+
+
+@app.get("/api/devices/export")
+async def export_devices(query: Optional[str] = Query(default=None)):
+    with db_session() as conn:
+        items = _fetch_devices(conn, query)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "借用数据"
+    ws.append(
+        [
+            "设备ID",
+            "设备型号",
+            "设备状态",
+            "设备类型",
+            "厂商",
+            "系统",
+            "系统版本",
+            "分辨率",
+            "架构",
+            "CPU型号",
+            "开机密码",
+            "备注",
+            "性能",
+            "借用人",
+            "借用时间",
+            "预计归还时间",
+            "借用状态",
+        ]
+    )
+    for item in items:
+        ws.append(
+            [
+                item.get("id") or "-",
+                item.get("model") or "-",
+                item.get("status") or "-",
+                item.get("type") or "-",
+                item.get("vendor_name") or "-",
+                item.get("system_name") or "-",
+                item.get("system_version") or "-",
+                item.get("resolution") or "-",
+                item.get("arch") or "-",
+                item.get("cpu") or "-",
+                item.get("boot_password") or "-",
+                item.get("notes") or "-",
+                _extract_performance(item.get("notes")),
+                item.get("borrower_name") or "-",
+                _format_notify_time(item.get("borrowed_at")),
+                _format_notify_time(item.get("expected_return_at")),
+                _format_loan_status(item.get("loan_status")),
+            ]
+        )
+    output = BytesIO()
+    wb.save(output)
+    output.seek(0)
+    filename = "borrow_data.xlsx"
+    headers = {"Content-Disposition": f'attachment; filename="{filename}"'}
+    return StreamingResponse(
+        content=output,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers=headers,
+    )
 
 
 @app.get("/api/settings/feishu")

@@ -1,8 +1,10 @@
 import os
+from io import BytesIO
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from openpyxl import load_workbook
 
 from backend.db import init_db
 from backend.main import app
@@ -373,3 +375,41 @@ def test_change_borrower_rejected_if_pending_request_exists(client):
 
     pending = client.get("/api/borrow-requests?status=pending&request_type=change").json()["items"]
     assert len(pending) == 1
+
+
+def test_export_devices(client):
+    vendor_id, system_id, version_id = create_vendor_system_version(client)
+    client.post(
+        "/api/devices",
+        json={
+            "model": "ExportBorrowPhone",
+            "status": "正常",
+            "type": "手机",
+            "vendor_id": vendor_id,
+            "system_id": system_id,
+            "system_version_id": version_id,
+        },
+    )
+    device_id = client.get("/api/devices").json()["items"][0]["id"]
+    borrow = client.post(
+        f"/api/devices/{device_id}/borrow",
+        json={
+            "borrower_name": "ExportUser",
+            "expected_return_at": "2099-12-31T10:00:00+00:00",
+        },
+    )
+    assert borrow.status_code == 200
+    request_id = client.get("/api/borrow-requests").json()["items"][0]["id"]
+    approve = client.post(f"/api/borrow-requests/{request_id}/approve")
+    assert approve.status_code == 200
+
+    resp = client.get("/api/devices/export")
+    assert resp.status_code == 200
+    wb = load_workbook(filename=BytesIO(resp.content))
+    ws = wb.active
+    header = [cell.value for cell in ws[1]]
+    assert "借用人" in header
+    assert "设备型号" in header
+    assert "借用状态" in header
+    rows = list(ws.iter_rows(min_row=2, values_only=True))
+    assert any(row[1] == "ExportBorrowPhone" for row in rows)
