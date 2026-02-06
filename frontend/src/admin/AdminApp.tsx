@@ -28,6 +28,7 @@ import {
   DatabaseOutlined,
   MobileOutlined,
   TabletOutlined,
+  ControlOutlined,
   SearchOutlined,
   ThunderboltOutlined,
   ReloadOutlined,
@@ -65,7 +66,7 @@ function normalizeSorter(
 }
 
 const STATUS_OPTIONS = ['正常', '损坏', '被常驻', '报修'];
-const TYPE_OPTIONS = ['手机', '平板'];
+const TYPE_OPTIONS = ['手机', '平板', '手柄'];
 const getStatusRank = (value?: string | null) => (value === '正常' ? 0 : 1);
 const compareStatus = (a?: string | null, b?: string | null) => {
   const diff = getStatusRank(a) - getStatusRank(b);
@@ -87,6 +88,14 @@ function renderDeviceType(value: string | null): ReactNode {
       <Space size={6} className="device-type device-type-tablet">
         <TabletOutlined />
         <span>平板</span>
+      </Space>
+    );
+  }
+  if (value === '手柄') {
+    return (
+      <Space size={6} className="device-type device-type-controller">
+        <ControlOutlined />
+        <span>手柄</span>
       </Space>
     );
   }

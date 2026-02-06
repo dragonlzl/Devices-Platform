@@ -20,6 +20,7 @@ import {
   ReloadOutlined,
   MobileOutlined,
   TabletOutlined,
+  ControlOutlined,
   CheckOutlined,
 } from '@ant-design/icons';
 import dayjs, { Dayjs } from 'dayjs';
@@ -426,6 +427,14 @@ export default function BorrowApp() {
             <Space size={6} className="device-type device-type-tablet">
               <TabletOutlined />
               <span>平板</span>
+            </Space>
+          );
+        }
+        if (value === '手柄') {
+          return (
+            <Space size={6} className="device-type device-type-controller">
+              <ControlOutlined />
+              <span>手柄</span>
             </Space>
           );
         }

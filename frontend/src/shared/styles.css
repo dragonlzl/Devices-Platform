@@ -319,6 +319,10 @@ body {
   color: #b04a2c;
 }
 
+.device-type-controller {
+  color: #5b47b5;
+}
+
 .tag-emphasis {
   font-size: 15px;
   font-weight: 600;
