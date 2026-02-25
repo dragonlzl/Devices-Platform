@@ -133,6 +133,31 @@ def test_borrow_request_cancel(client):
     assert device["loan_status"] == "available"
 
 
+def test_borrow_rejected_for_unregistered_status(client):
+    vendor_id, system_id, version_id = create_vendor_system_version(client)
+    client.post(
+        "/api/devices",
+        json={
+            "model": "UnregisteredPhone",
+            "status": "未登记借用",
+            "type": "手机",
+            "vendor_id": vendor_id,
+            "system_id": system_id,
+            "system_version_id": version_id,
+        },
+    )
+    device_id = client.get("/api/devices").json()["items"][0]["id"]
+    borrow = client.post(
+        f"/api/devices/{device_id}/borrow",
+        json={
+            "borrower_name": "Alice",
+            "expected_return_at": "2099-12-31T10:00:00+00:00",
+        },
+    )
+    assert borrow.status_code == 400
+    assert "未找到该设备的借用人" in borrow.json()["detail"]
+
+
 def test_vendor_rebind_on_delete(client):
     vendor_id, system_id, version_id = create_vendor_system_version(client)
     client.post(

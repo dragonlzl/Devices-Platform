@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   AutoComplete,
   Button,
@@ -7,6 +7,7 @@ import {
   Form,
   Input,
   Layout,
+  Popover,
   Space,
   Spin,
   Table,
@@ -256,6 +257,8 @@ export default function BorrowApp() {
   const [accurateModelName, setAccurateModelName] = useState('未配置');
   const [assignmentsReady, setAssignmentsReady] = useState(false);
   const [devicePage, setDevicePage] = useState(1);
+  const [blockedBorrowTipDeviceId, setBlockedBorrowTipDeviceId] = useState<number | null>(null);
+  const blockedBorrowTipTimerRef = useRef<number | null>(null);
   const [aiMode, setAiMode] = useState<'fast' | 'accurate' | null>(() => {
     const stored = localStorage.getItem('ai_search_mode');
     if (stored === 'fast' || stored === 'accurate') {
@@ -274,6 +277,8 @@ export default function BorrowApp() {
     一般: 2,
     较低: 3,
   };
+  const unregisteredBorrowTipText =
+    '未找到该设备的借用人，无法进行设备借用，请找回设备后，把状态改回“正常”。';
   const getStatusRank = (value?: string | null) => (value === '正常' ? 0 : 1);
   const compareStatus = (a?: string | null, b?: string | null) => {
     const diff = getStatusRank(a) - getStatusRank(b);
@@ -382,6 +387,25 @@ export default function BorrowApp() {
     loadDevices();
     loadModelState();
   }, []);
+
+  useEffect(() => {
+    return () => {
+      if (blockedBorrowTipTimerRef.current) {
+        window.clearTimeout(blockedBorrowTipTimerRef.current);
+      }
+    };
+  }, []);
+
+  const showBlockedBorrowTip = (deviceId: number) => {
+    setBlockedBorrowTipDeviceId(deviceId);
+    if (blockedBorrowTipTimerRef.current) {
+      window.clearTimeout(blockedBorrowTipTimerRef.current);
+    }
+    blockedBorrowTipTimerRef.current = window.setTimeout(() => {
+      setBlockedBorrowTipDeviceId((current) => (current === deviceId ? null : current));
+      blockedBorrowTipTimerRef.current = null;
+    }, 5000);
+  };
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -560,22 +584,47 @@ export default function BorrowApp() {
         const isAvailable = record.loan_status === 'available';
         const isPending = record.loan_status === 'pending';
         const isBorrowed = record.loan_status === 'borrowed';
+        const isUnregisteredBorrow = record.status === '未登记借用';
+        const canBorrow = isAvailable && !isUnregisteredBorrow;
+        const showUnregisteredBorrowTip = isAvailable && isUnregisteredBorrow;
+        const borrowButton = (
+          <button
+            type="button"
+            className={`loan-status-segment ${isAvailable ? 'is-active is-available' : ''} ${
+              canBorrow ? 'is-clickable' : ''
+            } ${showUnregisteredBorrowTip ? 'is-blocked' : ''}`}
+            disabled={!isAvailable && !showUnregisteredBorrowTip}
+            onClick={() => {
+              if (canBorrow) {
+                setBorrowDevice(record);
+                return;
+              }
+              if (showUnregisteredBorrowTip) {
+                showBlockedBorrowTip(record.id);
+              }
+            }}
+          >
+            可借
+          </button>
+        );
         return (
           <div className="loan-status-group" role="group" aria-label="借用状态">
-            <button
-              type="button"
-              className={`loan-status-segment ${isAvailable ? 'is-active is-available' : ''} ${
-                isAvailable ? 'is-clickable' : ''
-              }`}
-              disabled={!isAvailable}
-              onClick={() => {
-                if (isAvailable) {
-                  setBorrowDevice(record);
-                }
-              }}
-            >
-              可借
-            </button>
+            {showUnregisteredBorrowTip ? (
+              <Popover
+                trigger="click"
+                content={unregisteredBorrowTipText}
+                open={blockedBorrowTipDeviceId === record.id}
+                onOpenChange={(open) => {
+                  if (!open && blockedBorrowTipDeviceId === record.id) {
+                    setBlockedBorrowTipDeviceId(null);
+                  }
+                }}
+              >
+                {borrowButton}
+              </Popover>
+            ) : (
+              borrowButton
+            )}
             <span
               className={`loan-status-segment ${isPending ? 'is-active is-pending' : ''}`}
               aria-disabled="true"

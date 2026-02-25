@@ -780,13 +780,18 @@ async def borrow_device(device_id: int, payload: BorrowRequest, background_tasks
         raise HTTPException(status_code=400, detail="预计归还时间必须晚于当前时间")
     with db_session() as conn:
         row = conn.execute(
-            "SELECT loan_status, model FROM devices WHERE id = ?",
+            "SELECT loan_status, status, model FROM devices WHERE id = ?",
             (device_id,),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="设备不存在")
         if row["loan_status"] != "available":
             raise HTTPException(status_code=400, detail="设备不可借用")
+        if row["status"] == "未登记借用":
+            raise HTTPException(
+                status_code=400,
+                detail="未找到该设备的借用人，无法进行设备借用，请找回设备后，把状态改回“正常”。",
+            )
         request_now = now_iso()
         cur = conn.execute(
             """

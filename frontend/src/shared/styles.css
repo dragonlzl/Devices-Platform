@@ -229,6 +229,10 @@ body {
   cursor: pointer;
 }
 
+.loan-status-segment.is-blocked {
+  cursor: not-allowed;
+}
+
 .loan-status-segment.is-active.is-available {
   background: #2f8a57;
   color: #ffffff;

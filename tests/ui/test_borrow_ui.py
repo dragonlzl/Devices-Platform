@@ -4,7 +4,10 @@ import httpx
 from playwright.sync_api import expect
 
 
-def seed_device(base_url):
+UNREGISTERED_BORROW_TIP = "未找到该设备的借用人，无法进行设备借用，请找回设备后，把状态改回“正常”。"
+
+
+def seed_device(base_url, model="BorrowPhone", status="正常"):
     with httpx.Client(base_url=base_url) as client:
         vendors = client.get("/api/vendors").json()["items"]
         vendor = next((item for item in vendors if item["name"] == "BorrowVendor"), None)
@@ -31,14 +34,37 @@ def seed_device(base_url):
         client.post(
             "/api/devices",
             json={
-                "model": "BorrowPhone",
-                "status": "正常",
+                "model": model,
+                "status": status,
                 "type": "手机",
                 "vendor_id": vendor_id,
                 "system_id": system_id,
                 "system_version_id": version_id,
             },
         )
+
+
+def update_device_status(base_url, model, status):
+    with httpx.Client(base_url=base_url) as client:
+        items = client.get("/api/devices").json()["items"]
+        device = next(item for item in items if item["model"] == model)
+        resp = client.put(
+            f"/api/devices/{device['id']}",
+            json={
+                "model": device["model"],
+                "status": status,
+                "type": device["type"],
+                "vendor_id": device["vendor_id"],
+                "system_id": device["system_id"],
+                "system_version_id": device["system_version_id"],
+                "resolution": device.get("resolution"),
+                "arch": device.get("arch"),
+                "cpu": device.get("cpu"),
+                "boot_password": device.get("boot_password"),
+                "notes": device.get("notes"),
+            },
+        )
+        assert resp.status_code == 200
 
 
 def seed_devices(base_url, total):
@@ -90,7 +116,7 @@ def test_borrow_flow(page, base_url):
     row = page.locator("tr", has_text="BorrowPhone").first
     expect(row).to_be_visible()
 
-    row.get_by_role("button", name="可借用").click()
+    row.get_by_role("button", name="可借").click()
     page.get_by_label("借用人名字").fill("Tester")
     page.get_by_label("预计归还时间").click()
     expect(page.get_by_text("今天")).to_be_visible()
@@ -116,6 +142,26 @@ def test_borrow_flow(page, base_url):
     row.get_by_role("button", name="换借用人").click()
     notice = page.locator(".ant-message-notice").first
     expect(notice).to_contain_text("当前设备已有借用人更换申请，需等待管理员处理")
+
+
+def test_unregistered_status_blocks_borrow_action(page, base_url):
+    seed_device(base_url, model="UnregisteredPhone", status="未登记借用")
+    page.goto(f"{base_url}/borrow")
+    row = page.locator("tr", has_text="UnregisteredPhone").first
+    expect(row).to_be_visible()
+
+    row.get_by_role("button", name="可借").click()
+    tip = page.locator(".ant-popover-inner-content", has_text=UNREGISTERED_BORROW_TIP)
+    expect(tip).to_be_visible()
+    page.wait_for_timeout(5200)
+    expect(tip).to_be_hidden()
+
+    update_device_status(base_url, "UnregisteredPhone", "正常")
+    page.get_by_role("button", name="清除").click()
+    row = page.locator("tr", has_text="UnregisteredPhone").first
+    expect(row).to_contain_text("正常")
+    row.get_by_role("button", name="可借").click()
+    expect(page.get_by_label("借用人名字")).to_be_visible()
 
 
 def test_borrow_sort_resets_page(page, base_url):

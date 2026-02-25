@@ -65,7 +65,7 @@ function normalizeSorter(
   return {};
 }
 
-const STATUS_OPTIONS = ['正常', '损坏', '被常驻', '报修'];
+const STATUS_OPTIONS = ['正常', '未登记借用', '损坏', '被常驻', '报修'];
 const TYPE_OPTIONS = ['手机', '平板', '手柄'];
 const getStatusRank = (value?: string | null) => (value === '正常' ? 0 : 1);
 const compareStatus = (a?: string | null, b?: string | null) => {
