@@ -289,16 +289,19 @@ export default function BorrowApp() {
     const value = extractPerformance(notes);
     return performanceOrder[value] ?? 99;
   };
+  const filterBorrowVisibleDevices = (items: Device[]) =>
+    items.filter((item) => item.status !== '损坏');
 
   const loadDevices = async (q?: string) => {
     setLoading(true);
     try {
       const url = q ? `/api/devices?query=${encodeURIComponent(q)}` : '/api/devices';
       const data = await apiRequest<{ items: Device[] }>(url);
-      setDevices(data.items || []);
+      const visibleItems = filterBorrowVisibleDevices(data.items || []);
+      setDevices(visibleItems);
       setAiReason('');
       if (!q) {
-        setDeviceTotal(data.items?.length || 0);
+        setDeviceTotal(visibleItems.length);
       }
     } catch (err) {
       message.error((err as Error).message);
@@ -325,20 +328,24 @@ export default function BorrowApp() {
   const refreshDeviceStatus = async () => {
     try {
       const data = await apiRequest<{ items: Device[] }>('/api/devices');
-      const latest = new Map(data.items.map((item) => [item.id, item]));
-      setDeviceTotal(data.items?.length || 0);
+      const visibleItems = filterBorrowVisibleDevices(data.items || []);
+      const latest = new Map(visibleItems.map((item) => [item.id, item]));
+      setDeviceTotal(visibleItems.length);
       setDevices((prev) =>
-        prev.map((item) => {
-          const fresh = latest.get(item.id);
-          if (!fresh) return item;
-          return {
-            ...item,
-            loan_status: fresh.loan_status,
-            borrower_name: fresh.borrower_name,
-            borrowed_at: fresh.borrowed_at,
-            expected_return_at: fresh.expected_return_at,
-          };
-        })
+        prev
+          .filter((item) => latest.has(item.id))
+          .map((item) => {
+            const fresh = latest.get(item.id);
+            if (!fresh) return item;
+            return {
+              ...item,
+              status: fresh.status,
+              loan_status: fresh.loan_status,
+              borrower_name: fresh.borrower_name,
+              borrowed_at: fresh.borrowed_at,
+              expected_return_at: fresh.expected_return_at,
+            };
+          })
       );
     } catch {
       // background refresh should stay silent
@@ -783,10 +790,11 @@ export default function BorrowApp() {
                           method: 'POST',
                           body: { query: value, mode: aiMode || undefined },
                         });
-                        setDevices(data.items || []);
+                        const visibleItems = filterBorrowVisibleDevices(data.items || []);
+                        setDevices(visibleItems);
                         setAiReason(data.ai_reason || '');
                         setDevicePage(1);
-                        if (!data.items?.length) {
+                        if (!visibleItems.length) {
                           message.error('未找到匹配设备');
                         }
                       } catch (err) {

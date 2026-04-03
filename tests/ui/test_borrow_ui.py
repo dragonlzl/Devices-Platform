@@ -164,6 +164,19 @@ def test_unregistered_status_blocks_borrow_action(page, base_url):
     expect(page.get_by_label("借用人名字")).to_be_visible()
 
 
+def test_broken_devices_hidden_on_borrow_page_and_normal_search(page, base_url):
+    seed_device(base_url, model="VisiblePhone", status="正常")
+    seed_device(base_url, model="BrokenPhone", status="损坏")
+    page.goto(f"{base_url}/borrow")
+
+    expect(page.locator("tbody tr", has_text="VisiblePhone")).to_have_count(1)
+    expect(page.locator("tbody tr", has_text="BrokenPhone")).to_have_count(0)
+
+    page.get_by_placeholder("输入型号/系统/厂商等关键词").fill("BrokenPhone")
+    page.get_by_role("button", name="普通搜索").click()
+    expect(page.locator("tbody tr", has_text="BrokenPhone")).to_have_count(0)
+
+
 def test_borrow_sort_resets_page(page, base_url):
     seed_devices(base_url, total=21)
     page.goto(f"{base_url}/borrow")
