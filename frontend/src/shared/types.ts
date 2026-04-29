@@ -33,6 +33,10 @@ export interface Device {
   notes: string | null;
   loan_status: string;
   borrower_name: string | null;
+  borrower_user_id: string | null;
+  borrower_open_id: string | null;
+  borrower_avatar_url: string | null;
+  borrower_job_title: string | null;
   borrowed_at: string | null;
   expected_return_at: string | null;
 }
@@ -42,6 +46,10 @@ export interface BorrowRequestItem {
   device_id: number;
   device_model: string;
   borrower_name: string;
+  borrower_user_id: string | null;
+  borrower_open_id: string | null;
+  borrower_avatar_url: string | null;
+  borrower_job_title: string | null;
   expected_return_at: string;
   request_type: string;
   request_status: string;
@@ -64,6 +72,10 @@ export interface BorrowRecord {
   device_id: number;
   device_model: string;
   borrower_name: string;
+  borrower_user_id: string | null;
+  borrower_open_id: string | null;
+  borrower_avatar_url: string | null;
+  borrower_job_title: string | null;
   borrowed_at: string;
   expected_return_at: string | null;
   returned_at: string | null;
@@ -77,10 +89,50 @@ export interface BorrowerChangeRecord {
   record_id: number | null;
   request_id: number | null;
   borrower_before: string | null;
+  borrower_before_user_id: string | null;
+  borrower_before_open_id: string | null;
+  borrower_before_avatar_url: string | null;
+  borrower_before_job_title: string | null;
   borrower_after: string | null;
+  borrower_after_user_id: string | null;
+  borrower_after_open_id: string | null;
+  borrower_after_avatar_url: string | null;
+  borrower_after_job_title: string | null;
   expected_before: string | null;
   expected_after: string | null;
   changed_at: string;
+}
+
+export interface PortalUser {
+  user_id?: string | null;
+  open_id?: string | null;
+  union_id?: string | null;
+  name?: string | null;
+  avatar_url?: string | null;
+  job_title?: string | null;
+  job_functions?: string[] | null;
+  job_title_status?: string | null;
+  profile_status?: string | null;
+}
+
+export interface PortalJwtSession {
+  user: PortalUser;
+  token: string;
+  claims?: Record<string, unknown>;
+  expiresAt?: number | string | null;
+  audience?: string | null;
+  audiences?: string[] | null;
+  isTestUser?: boolean;
+  isSoulknightProject?: boolean;
+}
+
+export interface PersonSnapshot {
+  name?: string | null;
+  avatar_url?: string | null;
+  job_title?: string | null;
+  job_functions?: string[] | null;
+  job_title_status?: string | null;
+  profile_status?: string | null;
 }
 
 export interface LLMModel {

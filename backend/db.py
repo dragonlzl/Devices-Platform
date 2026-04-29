@@ -29,6 +29,39 @@ def connect_db() -> sqlite3.Connection:
     return conn
 
 
+def _ensure_columns(conn: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    for name, definition in columns.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+
+def _ensure_person_snapshot_columns(conn: sqlite3.Connection) -> None:
+    borrower_columns = {
+        "borrower_user_id": "TEXT",
+        "borrower_open_id": "TEXT",
+        "borrower_avatar_url": "TEXT",
+        "borrower_job_title": "TEXT",
+    }
+    for table in ("devices", "borrow_requests", "borrow_records"):
+        _ensure_columns(conn, table, borrower_columns)
+
+    _ensure_columns(
+        conn,
+        "borrow_changes",
+        {
+            "borrower_before_user_id": "TEXT",
+            "borrower_before_open_id": "TEXT",
+            "borrower_before_avatar_url": "TEXT",
+            "borrower_before_job_title": "TEXT",
+            "borrower_after_user_id": "TEXT",
+            "borrower_after_open_id": "TEXT",
+            "borrower_after_avatar_url": "TEXT",
+            "borrower_after_job_title": "TEXT",
+        },
+    )
+
+
 @contextmanager
 def db_session():
     conn = connect_db()
@@ -84,6 +117,10 @@ def init_db() -> None:
                 notes TEXT,
                 loan_status TEXT NOT NULL DEFAULT 'available',
                 borrower_name TEXT,
+                borrower_user_id TEXT,
+                borrower_open_id TEXT,
+                borrower_avatar_url TEXT,
+                borrower_job_title TEXT,
                 borrowed_at TEXT,
                 expected_return_at TEXT,
                 overdue_notified INTEGER NOT NULL DEFAULT 0,
@@ -99,6 +136,10 @@ def init_db() -> None:
                 device_id INTEGER NOT NULL,
                 device_model TEXT NOT NULL,
                 borrower_name TEXT NOT NULL,
+                borrower_user_id TEXT,
+                borrower_open_id TEXT,
+                borrower_avatar_url TEXT,
+                borrower_job_title TEXT,
                 expected_return_at TEXT NOT NULL,
                 request_type TEXT NOT NULL,
                 status TEXT NOT NULL,
@@ -114,6 +155,10 @@ def init_db() -> None:
                 device_id INTEGER NOT NULL,
                 device_model TEXT NOT NULL,
                 borrower_name TEXT NOT NULL,
+                borrower_user_id TEXT,
+                borrower_open_id TEXT,
+                borrower_avatar_url TEXT,
+                borrower_job_title TEXT,
                 borrowed_at TEXT NOT NULL,
                 expected_return_at TEXT,
                 returned_at TEXT,
@@ -131,7 +176,15 @@ def init_db() -> None:
                 record_id INTEGER,
                 request_id INTEGER,
                 borrower_before TEXT,
+                borrower_before_user_id TEXT,
+                borrower_before_open_id TEXT,
+                borrower_before_avatar_url TEXT,
+                borrower_before_job_title TEXT,
                 borrower_after TEXT,
+                borrower_after_user_id TEXT,
+                borrower_after_open_id TEXT,
+                borrower_after_avatar_url TEXT,
+                borrower_after_job_title TEXT,
                 expected_before TEXT,
                 expected_after TEXT,
                 changed_at TEXT NOT NULL,
@@ -156,3 +209,4 @@ def init_db() -> None:
             );
             """
         )
+        _ensure_person_snapshot_columns(conn)

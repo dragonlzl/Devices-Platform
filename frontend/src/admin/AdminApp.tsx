@@ -39,6 +39,7 @@ import {
   ExportOutlined,
 } from '@ant-design/icons';
 import { apiRequest } from '../shared/api';
+import PersonDisplay, { personFromBorrower, personFromChange } from '../shared/PersonDisplay';
 import {
   BorrowRecord,
   BorrowRequestItem,
@@ -47,6 +48,7 @@ import {
   LLMModelAssignments,
   SystemItem,
   SystemVersion,
+  PortalUser,
   Vendor,
 } from '../shared/types';
 import { extractPerformance, formatDateTime, pickPerformanceColor, pickTagColor } from '../shared/utils';
@@ -979,7 +981,7 @@ function ModelFormDrawer(props: {
   );
 }
 
-export default function AdminApp() {
+export default function AdminApp(props: { currentUser: PortalUser }) {
   const [vendors, setVendors] = useState<Vendor[]>([]);
   const [systems, setSystems] = useState<SystemItem[]>([]);
   const [devices, setDevices] = useState<Device[]>([]);
@@ -1364,7 +1366,7 @@ export default function AdminApp() {
       dataIndex: 'borrower_name',
       key: 'borrower_name',
       align: 'center' as const,
-      render: (value: string | null) => value || '-',
+      render: (_: string | null, record: Device) => <PersonDisplay person={personFromBorrower(record)} size="small" />,
     },
     {
       title: '操作',
@@ -1432,7 +1434,15 @@ export default function AdminApp() {
       render: (value: string) =>
         value === 'change' ? <Tag color="purple">借用变更</Tag> : <Tag color="blue">借用</Tag>,
     },
-    { title: '申请人', dataIndex: 'borrower_name', key: 'borrower_name', align: 'center' as const },
+    {
+      title: '申请人',
+      dataIndex: 'borrower_name',
+      key: 'borrower_name',
+      align: 'center' as const,
+      render: (_: string, record: BorrowRequestItem) => (
+        <PersonDisplay person={personFromBorrower(record)} size="small" />
+      ),
+    },
     { title: '设备型号', dataIndex: 'device_model', key: 'device_model' },
     {
       title: '申请时间',
@@ -1489,7 +1499,13 @@ export default function AdminApp() {
   ];
 
   const recordColumns = [
-    { title: '借用人', dataIndex: 'borrower_name', key: 'borrower_name', align: 'center' as const },
+    {
+      title: '借用人',
+      dataIndex: 'borrower_name',
+      key: 'borrower_name',
+      align: 'center' as const,
+      render: (_: string, record: BorrowRecord) => <PersonDisplay person={personFromBorrower(record)} size="small" />,
+    },
     {
       title: '借用人变更',
       key: 'borrower_changes',
@@ -1501,10 +1517,10 @@ export default function AdminApp() {
         return (
           <Space direction="vertical" size={2}>
             {changes.map((change, index) => (
-              <div key={change.id ?? index}>
-                <div>
-                  {(change.borrower_before || '-') + ' → ' + (change.borrower_after || '-')}
-                </div>
+              <div key={change.id ?? index} className="borrower-change-row">
+                <PersonDisplay person={personFromChange(change, 'before')} size="tiny" />
+                <span className="borrower-change-arrow">→</span>
+                <PersonDisplay person={personFromChange(change, 'after')} size="tiny" />
                 <div className="muted">{formatDateTime(change.changed_at)}</div>
               </div>
             ))}
@@ -1705,6 +1721,9 @@ export default function AdminApp() {
                 { key: 'records', icon: <ProfileOutlined />, label: '借用记录' },
               ]}
             />
+            <div className="sider-current-user">
+              <PersonDisplay person={props.currentUser} size="medium" showJobTitle />
+            </div>
           </Layout.Sider>
           <Layout.Content className="app-content app-content-with-sider">
             <div className="page page-with-sider">
@@ -2313,7 +2332,7 @@ export default function AdminApp() {
           <Typography.Text strong>类型</Typography.Text>
           <Typography.Text>{requestDetail?.request_type === 'change' ? '借用变更' : '借用'}</Typography.Text>
           <Typography.Text strong>申请人</Typography.Text>
-          <Typography.Text>{requestDetail?.borrower_name || '-'}</Typography.Text>
+          <PersonDisplay person={requestDetail ? personFromBorrower(requestDetail) : null} size="medium" />
           <Typography.Text strong>设备型号</Typography.Text>
           <Typography.Text>{requestDetail?.device_model || '-'}</Typography.Text>
           <Typography.Text strong>申请时间</Typography.Text>

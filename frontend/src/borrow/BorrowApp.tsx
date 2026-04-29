@@ -26,7 +26,9 @@ import {
 } from '@ant-design/icons';
 import dayjs, { Dayjs } from 'dayjs';
 import { apiRequest } from '../shared/api';
-import { BorrowRequestItem, Device, LLMModel, LLMModelAssignments } from '../shared/types';
+import { getUserDisplayName } from '../shared/auth';
+import PersonDisplay, { personFromBorrower } from '../shared/PersonDisplay';
+import { BorrowRequestItem, Device, LLMModel, LLMModelAssignments, PortalUser } from '../shared/types';
 import {
   extractPerformance,
   formatDateTime,
@@ -53,8 +55,9 @@ function normalizeSorter(
 function BorrowDrawer(props: {
   open: boolean;
   device: Device | null;
+  currentUser: PortalUser;
   onCancel: () => void;
-  onConfirm: (borrower: string, expected: Dayjs) => void;
+  onConfirm: (expected: Dayjs) => void;
 }) {
   const [form] = Form.useForm();
 
@@ -66,12 +69,10 @@ function BorrowDrawer(props: {
   return (
     <Drawer open={props.open} onClose={props.onCancel} width={420} title={`借用设备 ${props.device?.model || ''}`}>
       <Form layout="vertical" form={form}>
-        <Form.Item
-          label="借用人名字"
-          name="borrower"
-          rules={[{ required: true, message: '借用人不能为空' }]}
-        >
-          <Input placeholder="输入借用人名字" />
+        <Form.Item label="借用人">
+          <div className="drawer-person-panel">
+            <PersonDisplay person={props.currentUser} size="medium" showJobTitle />
+          </div>
         </Form.Item>
         <Form.Item
           label="预计归还时间"
@@ -92,7 +93,7 @@ function BorrowDrawer(props: {
           onClick={() => {
             form
               .validateFields()
-              .then((values) => props.onConfirm(values.borrower, values.expected))
+              .then((values) => props.onConfirm(values.expected))
               .catch(() => message.error('请填写借用信息'));
           }}
         >
@@ -106,15 +107,15 @@ function BorrowDrawer(props: {
 function ChangeBorrowerDrawer(props: {
   open: boolean;
   device: Device | null;
+  currentUser: PortalUser;
   onCancel: () => void;
-  onConfirm: (borrower: string, expected: Dayjs) => void;
+  onConfirm: (expected: Dayjs) => void;
 }) {
   const [form] = Form.useForm();
 
   useEffect(() => {
     if (!props.open) return;
     form.setFieldsValue({
-      borrower: props.device?.borrower_name || '',
       expected: toDayjs(props.device?.expected_return_at) || undefined,
     });
   }, [props.open, props.device, form]);
@@ -127,12 +128,15 @@ function ChangeBorrowerDrawer(props: {
       title={`变更借用人 ${props.device?.model || ''}`}
     >
       <Form layout="vertical" form={form}>
-        <Form.Item
-          label="借用人名字"
-          name="borrower"
-          rules={[{ required: true, message: '借用人不能为空' }]}
-        >
-          <Input placeholder="输入借用人名字" />
+        <Form.Item label="原借用人">
+          <div className="drawer-person-panel">
+            <PersonDisplay person={personFromBorrower(props.device || {})} size="medium" showJobTitle />
+          </div>
+        </Form.Item>
+        <Form.Item label="新借用人名字">
+          <div className="drawer-person-panel">
+            <PersonDisplay person={props.currentUser} size="medium" showJobTitle />
+          </div>
         </Form.Item>
         <Form.Item
           label="预计归还时间"
@@ -153,7 +157,7 @@ function ChangeBorrowerDrawer(props: {
           onClick={() => {
             form
               .validateFields()
-              .then((values) => props.onConfirm(values.borrower, values.expected))
+              .then((values) => props.onConfirm(values.expected))
               .catch(() => message.error('请填写借用信息'));
           }}
         >
@@ -234,7 +238,7 @@ function ExtendDrawer(props: {
   );
 }
 
-export default function BorrowApp() {
+export default function BorrowApp(props: { currentUser: PortalUser }) {
   const [devices, setDevices] = useState<Device[]>([]);
   const [loading, setLoading] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
@@ -548,10 +552,12 @@ export default function BorrowApp() {
       align: 'center' as const,
       render: (_: string, record: Device) => {
         const borrower = record.borrower_name?.trim();
+        const currentUserName = getUserDisplayName(props.currentUser).trim();
+        const canChangeBorrower = Boolean(borrower && borrower !== currentUserName);
         return (
           <Space direction="vertical" size={4} align="center">
-            <span>{borrower || '-'}</span>
-            {borrower ? (
+            <PersonDisplay person={personFromBorrower(record)} size="small" />
+            {canChangeBorrower ? (
               <Button size="small" onClick={() => handleOpenChangeBorrower(record)}>
                 换借用人
               </Button>
@@ -747,6 +753,7 @@ export default function BorrowApp() {
             </Typography.Title>
             <Typography.Text type="secondary">快速查找与借用设备，支持智能搜索与延期。</Typography.Text>
           </Space>
+          <PersonDisplay person={props.currentUser} size="medium" showJobTitle className="header-user" />
         </div>
       </Layout.Header>
       <Layout.Content className="app-content">
@@ -897,8 +904,9 @@ export default function BorrowApp() {
           <BorrowDrawer
             open={Boolean(borrowDevice)}
             device={borrowDevice}
+            currentUser={props.currentUser}
             onCancel={() => setBorrowDevice(null)}
-            onConfirm={async (borrower, expected) => {
+            onConfirm={async (expected) => {
               if (!borrowDevice) return;
               const iso = toISOString(expected);
               if (!iso) {
@@ -908,7 +916,7 @@ export default function BorrowApp() {
               try {
                 await apiRequest(`/api/devices/${borrowDevice.id}/borrow`, {
                   method: 'POST',
-                  body: { borrower_name: borrower.trim(), expected_return_at: iso },
+                  body: { borrower_name: getUserDisplayName(props.currentUser), expected_return_at: iso },
                 });
                 message.success({ content: '已通知管理员，请前往管理员出借用设备', duration: 8 });
                 setBorrowDevice(null);
@@ -922,8 +930,9 @@ export default function BorrowApp() {
           <ChangeBorrowerDrawer
             open={Boolean(changeBorrowDevice)}
             device={changeBorrowDevice}
+            currentUser={props.currentUser}
             onCancel={() => setChangeBorrowDevice(null)}
-            onConfirm={async (borrower, expected) => {
+            onConfirm={async (expected) => {
               if (!changeBorrowDevice) return;
               const iso = toISOString(expected);
               if (!iso) {
@@ -933,7 +942,7 @@ export default function BorrowApp() {
               try {
                 await apiRequest(`/api/devices/${changeBorrowDevice.id}/change-borrower`, {
                   method: 'POST',
-                  body: { borrower_name: borrower.trim(), expected_return_at: iso },
+                  body: { borrower_name: getUserDisplayName(props.currentUser), expected_return_at: iso },
                 });
                 message.success({ content: '已发送通知到管理员，请等待管理员确认操作。', duration: 5 });
                 setChangeBorrowDevice(null);

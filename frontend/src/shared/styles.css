@@ -86,11 +86,14 @@ body {
 
 .app-sider .ant-layout-sider-children {
   background: transparent;
+  display: flex;
+  flex-direction: column;
 }
 
 .app-sider .ant-menu {
   background: transparent;
   border-inline-end: 0;
+  flex: 1;
 }
 
 .app-sider .ant-menu-item {
@@ -158,6 +161,123 @@ body {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
+}
+
+.auth-loading {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  color: var(--muted);
+  font-size: 15px;
+}
+
+.person-display {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  min-width: 0;
+  gap: 8px;
+  vertical-align: middle;
+}
+
+.person-display-avatar {
+  flex: 0 0 auto;
+  background: #2f6ff2;
+  color: #ffffff;
+  font-weight: 700;
+}
+
+.person-display-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.25;
+  text-align: left;
+}
+
+.person-display-name,
+.person-display-job {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.person-display-name {
+  font-size: 14px;
+}
+
+.person-display-job {
+  color: var(--muted);
+  font-size: 12px;
+  margin-top: 2px;
+}
+
+.person-display-medium {
+  gap: 10px;
+}
+
+.person-display-medium .person-display-name {
+  font-size: 16px;
+}
+
+.person-display-medium .person-display-job {
+  font-size: 13px;
+}
+
+.person-display-small .person-display-name {
+  font-size: 13px;
+}
+
+.person-display-tiny {
+  gap: 6px;
+}
+
+.person-display-tiny .person-display-name {
+  max-width: 90px;
+  font-size: 12px;
+}
+
+.header-user {
+  padding: 6px 10px 6px 6px;
+  border: 1px solid rgba(31, 111, 178, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.72);
+}
+
+.sider-current-user {
+  margin: auto 12px 14px;
+  padding: 14px 12px;
+  border: 1px solid rgba(31, 111, 178, 0.16);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.62);
+}
+
+.drawer-person-panel {
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #f7faf8;
+}
+
+.borrower-change-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: center;
+  column-gap: 6px;
+  row-gap: 2px;
+}
+
+.borrower-change-row .muted {
+  grid-column: 1 / -1;
+  font-size: 12px;
+}
+
+.borrower-change-arrow {
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .table-card {

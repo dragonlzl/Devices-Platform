@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional, Union
 import httpx
 import os
 from pathlib import Path
-from fastapi import BackgroundTasks, FastAPI, HTTPException, Query
+from fastapi import BackgroundTasks, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -43,6 +43,10 @@ from .schemas import (
 BASE_DIR = Path(__file__).resolve()
 BACKEND_DIR = BASE_DIR.parent
 REPO_DIR = BACKEND_DIR.parent
+PORTAL_JWT_VERIFY_URL = os.environ.get(
+    "PORTAL_JWT_VERIFY_URL",
+    "http://192.168.50.10:8756/api/sso/jwt/verify",
+)
 
 app = FastAPI()
 app.add_middleware(
@@ -150,6 +154,100 @@ def _delete_setting(conn, key: str) -> None:
     conn.execute("DELETE FROM settings WHERE key = ?", (key,))
 
 
+def _clean_text(value: Any) -> str:
+    return str(value or "").strip()
+
+
+def _legacy_borrower_profile(name: Optional[str]) -> Dict[str, Optional[str]]:
+    return {
+        "name": _clean_text(name),
+        "user_id": None,
+        "open_id": None,
+        "avatar_url": None,
+        "job_title": None,
+    }
+
+
+def _borrower_profile_from_user(user: Dict[str, Any]) -> Dict[str, Optional[str]]:
+    name = _clean_text(user.get("name")) or "已登录用户"
+    return {
+        "name": name,
+        "user_id": _clean_text(user.get("user_id")) or None,
+        "open_id": _clean_text(user.get("open_id")) or None,
+        "avatar_url": _clean_text(user.get("avatar_url")) or None,
+        "job_title": _clean_text(user.get("job_title")) or None,
+    }
+
+
+def _borrower_profile_from_row(row: Union[Dict[str, Any], Any], prefix: str = "borrower") -> Dict[str, Optional[str]]:
+    if row is None:
+        return _legacy_borrower_profile(None)
+    getter = row.get if isinstance(row, dict) else lambda key, default=None: row[key] if key in row.keys() else default
+    return {
+        "name": _clean_text(getter(f"{prefix}_name", None) if prefix == "borrower" else getter(prefix, None)),
+        "user_id": _clean_text(getter(f"{prefix}_user_id", None)) or None,
+        "open_id": _clean_text(getter(f"{prefix}_open_id", None)) or None,
+        "avatar_url": _clean_text(getter(f"{prefix}_avatar_url", None)) or None,
+        "job_title": _clean_text(getter(f"{prefix}_job_title", None)) or None,
+    }
+
+
+def _borrower_values(profile: Dict[str, Optional[str]]) -> tuple:
+    return (
+        profile.get("name"),
+        profile.get("user_id"),
+        profile.get("open_id"),
+        profile.get("avatar_url"),
+        profile.get("job_title"),
+    )
+
+
+def _get_portal_token(request: Request) -> str:
+    auth_header = request.headers.get("authorization", "")
+    if auth_header.lower().startswith("bearer "):
+        return auth_header[7:].strip()
+    return request.headers.get("x-portal-jwt", "").strip()
+
+
+async def _require_portal_borrower_profile(request: Request) -> Dict[str, Optional[str]]:
+    token = _get_portal_token(request)
+    if not token:
+        raise HTTPException(status_code=401, detail="缺少门户登录凭证", headers={"X-Auth-Error": "SSO_JWT_MISSING"})
+
+    audience = request.headers.get("x-portal-audience") or request.headers.get("origin") or str(request.base_url).rstrip("/")
+    client: httpx.AsyncClient = app.state.http_client
+    try:
+        response = await client.post(
+            PORTAL_JWT_VERIFY_URL,
+            json={"token": token, "audience": audience},
+        )
+    except httpx.HTTPError:
+        raise HTTPException(status_code=503, detail="门户登录校验暂不可用")
+
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = {}
+
+    if response.status_code >= 400 or not payload.get("success"):
+        code = payload.get("code") or "SSO_JWT_INVALID"
+        detail = "登录凭证已失效，正在重新登录/请重新登录" if code == "SSO_JWT_INVALID" else payload.get("message", "门户登录校验失败")
+        raise HTTPException(status_code=401, detail=f"{code}: {detail}", headers={"X-Auth-Error": str(code)})
+
+    data = payload.get("data") or {}
+    user = data.get("user") or {}
+    if not isinstance(user, dict):
+        raise HTTPException(status_code=401, detail="SSO_JWT_INVALID: 登录凭证已失效，正在重新登录/请重新登录")
+    return _borrower_profile_from_user(user)
+
+
+async def _resolve_borrower_profile(request: Request, fallback_name: Optional[str]) -> Dict[str, Optional[str]]:
+    if _get_portal_token(request):
+        return await _require_portal_borrower_profile(request)
+    _ensure_required(fallback_name, "借用人名字")
+    return _legacy_borrower_profile(fallback_name)
+
+
 def _get_int_setting(conn, key: str) -> Optional[int]:
     value = _get_setting(conn, key)
     if value and value.isdigit():
@@ -161,7 +259,7 @@ def _insert_borrow_record(
     conn,
     device_id: int,
     device_model: str,
-    borrower_name: str,
+    borrower_profile: Dict[str, Optional[str]],
     borrowed_at: str,
     expected_return_at: Optional[str],
     request_id: Optional[int],
@@ -170,15 +268,16 @@ def _insert_borrow_record(
     conn.execute(
         """
         INSERT INTO borrow_records (
-            device_id, device_model, borrower_name, borrowed_at, expected_return_at,
+            device_id, device_model, borrower_name, borrower_user_id, borrower_open_id,
+            borrower_avatar_url, borrower_job_title, borrowed_at, expected_return_at,
             returned_at, status, request_id, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, NULL, 'borrowed', ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'borrowed', ?, ?, ?)
         """,
         (
             device_id,
             device_model,
-            borrower_name,
+            *_borrower_values(borrower_profile),
             borrowed_at,
             expected_return_at,
             request_id,
@@ -302,7 +401,8 @@ def _fetch_borrow_requests(
 ) -> List[Dict[str, Any]]:
     sql = (
         "SELECT "
-        "br.id, br.device_id, br.device_model, br.borrower_name, br.expected_return_at, "
+        "br.id, br.device_id, br.device_model, br.borrower_name, br.borrower_user_id, "
+        "br.borrower_open_id, br.borrower_avatar_url, br.borrower_job_title, br.expected_return_at, "
         "br.request_type, br.status AS request_status, br.requested_at, br.handled_at, "
         "d.status AS device_status, d.type AS device_type, v.name AS vendor_name, "
         "s.name AS system_name, sv.version AS system_version, "
@@ -337,7 +437,8 @@ def _fetch_borrow_requests(
 
 def _fetch_borrow_records(conn, query: Optional[str] = None) -> List[Dict[str, Any]]:
     sql = (
-        "SELECT id, device_id, device_model, borrower_name, borrowed_at, expected_return_at, "
+        "SELECT id, device_id, device_model, borrower_name, borrower_user_id, borrower_open_id, "
+        "borrower_avatar_url, borrower_job_title, borrowed_at, expected_return_at, "
         "returned_at, status, request_id "
         "FROM borrow_records "
     )
@@ -366,7 +467,10 @@ def _fetch_borrow_records(conn, query: Optional[str] = None) -> List[Dict[str, A
         conditions.append(f"request_id IN ({placeholders})")
         params.extend(request_ids)
     sql = (
-        "SELECT id, record_id, request_id, borrower_before, borrower_after, expected_before, "
+        "SELECT id, record_id, request_id, borrower_before, borrower_before_user_id, "
+        "borrower_before_open_id, borrower_before_avatar_url, borrower_before_job_title, "
+        "borrower_after, borrower_after_user_id, borrower_after_open_id, borrower_after_avatar_url, "
+        "borrower_after_job_title, expected_before, "
         "expected_after, changed_at FROM borrow_changes "
     )
     if conditions:
@@ -389,6 +493,78 @@ def _fetch_borrow_records(conn, query: Optional[str] = None) -> List[Dict[str, A
         else:
             item["borrower_changes"] = []
     return items
+
+
+def _migrate_borrower_table(conn, table: str, profile: Dict[str, Optional[str]]) -> int:
+    name = profile["name"]
+    now = now_iso()
+    cur = conn.execute(
+        f"""
+        UPDATE {table}
+        SET borrower_name = ?,
+            borrower_user_id = ?,
+            borrower_open_id = ?,
+            borrower_avatar_url = ?,
+            borrower_job_title = ?,
+            updated_at = ?
+        WHERE borrower_name IS NOT NULL
+          AND TRIM(borrower_name) = ?
+          AND (
+            borrower_name <> ?
+            OR COALESCE(borrower_user_id, '') <> COALESCE(?, '')
+            OR COALESCE(borrower_open_id, '') <> COALESCE(?, '')
+            OR COALESCE(borrower_avatar_url, '') <> COALESCE(?, '')
+            OR COALESCE(borrower_job_title, '') <> COALESCE(?, '')
+          )
+        """,
+        (
+            *_borrower_values(profile),
+            now,
+            name,
+            profile.get("name"),
+            profile.get("user_id"),
+            profile.get("open_id"),
+            profile.get("avatar_url"),
+            profile.get("job_title"),
+        ),
+    )
+    return cur.rowcount
+
+
+def _migrate_borrower_change_side(conn, side: str, profile: Dict[str, Optional[str]]) -> int:
+    name = profile["name"]
+    now = now_iso()
+    cur = conn.execute(
+        f"""
+        UPDATE borrow_changes
+        SET {side} = ?,
+            {side}_user_id = ?,
+            {side}_open_id = ?,
+            {side}_avatar_url = ?,
+            {side}_job_title = ?,
+            updated_at = ?
+        WHERE {side} IS NOT NULL
+          AND TRIM({side}) = ?
+          AND (
+            {side} <> ?
+            OR COALESCE({side}_user_id, '') <> COALESCE(?, '')
+            OR COALESCE({side}_open_id, '') <> COALESCE(?, '')
+            OR COALESCE({side}_avatar_url, '') <> COALESCE(?, '')
+            OR COALESCE({side}_job_title, '') <> COALESCE(?, '')
+          )
+        """,
+        (
+            *_borrower_values(profile),
+            now,
+            name,
+            profile.get("name"),
+            profile.get("user_id"),
+            profile.get("open_id"),
+            profile.get("avatar_url"),
+            profile.get("job_title"),
+        ),
+    )
+    return cur.rowcount
 
 
 def _filter_ai_devices(devices: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
@@ -680,6 +856,18 @@ async def list_devices(query: Optional[str] = None):
     return {"items": items}
 
 
+@app.post("/api/current-user/migrate-borrower-data")
+async def migrate_current_user_borrower_data(request: Request):
+    profile = await _require_portal_borrower_profile(request)
+    with db_session() as conn:
+        migrated = 0
+        for table in ("devices", "borrow_requests", "borrow_records"):
+            migrated += _migrate_borrower_table(conn, table, profile)
+        migrated += _migrate_borrower_change_side(conn, "borrower_before", profile)
+        migrated += _migrate_borrower_change_side(conn, "borrower_after", profile)
+    return {"message": "迁移完成", "migrated": migrated}
+
+
 @app.post("/api/devices")
 async def create_device(payload: DeviceCreate):
     _ensure_required(payload.model, "设备型号")
@@ -772,8 +960,9 @@ async def delete_device(device_id: int):
 
 
 @app.post("/api/devices/{device_id}/borrow")
-async def borrow_device(device_id: int, payload: BorrowRequest, background_tasks: BackgroundTasks):
-    _ensure_required(payload.borrower_name, "借用人名字")
+async def borrow_device(device_id: int, payload: BorrowRequest, background_tasks: BackgroundTasks, request: Request):
+    borrower_profile = await _resolve_borrower_profile(request, payload.borrower_name)
+    _ensure_required(borrower_profile["name"], "借用人名字")
     expected_return = _parse_datetime(payload.expected_return_at)
     now = datetime.now(timezone.utc)
     if expected_return <= now:
@@ -796,15 +985,16 @@ async def borrow_device(device_id: int, payload: BorrowRequest, background_tasks
         cur = conn.execute(
             """
             INSERT INTO borrow_requests (
-                device_id, device_model, borrower_name, expected_return_at,
+                device_id, device_model, borrower_name, borrower_user_id, borrower_open_id,
+                borrower_avatar_url, borrower_job_title, expected_return_at,
                 request_type, status, requested_at, handled_at, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, 'borrow', 'pending', ?, NULL, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'borrow', 'pending', ?, NULL, ?, ?)
             """,
             (
                 device_id,
                 row["model"],
-                payload.borrower_name.strip(),
+                *_borrower_values(borrower_profile),
                 expected_return.isoformat(),
                 request_now,
                 request_now,
@@ -816,6 +1006,10 @@ async def borrow_device(device_id: int, payload: BorrowRequest, background_tasks
             UPDATE devices SET
                 loan_status = 'pending',
                 borrower_name = ?,
+                borrower_user_id = ?,
+                borrower_open_id = ?,
+                borrower_avatar_url = ?,
+                borrower_job_title = ?,
                 borrowed_at = NULL,
                 expected_return_at = ?,
                 overdue_notified = 0,
@@ -823,14 +1017,14 @@ async def borrow_device(device_id: int, payload: BorrowRequest, background_tasks
             WHERE id = ?
             """,
             (
-                payload.borrower_name.strip(),
+                *_borrower_values(borrower_profile),
                 expected_return.isoformat(),
                 now_iso(),
                 device_id,
             ),
         )
     body = (
-        f"借用人名字: {payload.borrower_name.strip()}\n"
+        f"借用人名字: {borrower_profile['name']}\n"
         f"借用的设备型号: {row['model']}\n"
         f"归还时间: {_format_notify_time(expected_return)}\n"
         "待借设备"
@@ -874,16 +1068,21 @@ async def extend_device(device_id: int, payload: ExtendRequest, background_tasks
 
 @app.post("/api/devices/{device_id}/change-borrower")
 async def change_borrower(
-    device_id: int, payload: BorrowerChangeRequest, background_tasks: BackgroundTasks
+    device_id: int, payload: BorrowerChangeRequest, background_tasks: BackgroundTasks, request: Request
 ):
-    _ensure_required(payload.borrower_name, "借用人名字")
+    borrower_profile = await _resolve_borrower_profile(request, payload.borrower_name)
+    _ensure_required(borrower_profile["name"], "借用人名字")
     expected_return = _parse_datetime(payload.expected_return_at)
     now = datetime.now(timezone.utc)
     if expected_return <= now:
         raise HTTPException(status_code=400, detail="预计归还时间必须晚于当前时间")
     with db_session() as conn:
         row = conn.execute(
-            "SELECT loan_status, borrower_name, expected_return_at, model FROM devices WHERE id = ?",
+            """
+            SELECT loan_status, borrower_name, borrower_user_id, borrower_open_id,
+                   borrower_avatar_url, borrower_job_title, expected_return_at, model
+            FROM devices WHERE id = ?
+            """,
             (device_id,),
         ).fetchone()
         if not row:
@@ -908,15 +1107,16 @@ async def change_borrower(
         conn.execute(
             """
             INSERT INTO borrow_requests (
-                device_id, device_model, borrower_name, expected_return_at,
+                device_id, device_model, borrower_name, borrower_user_id, borrower_open_id,
+                borrower_avatar_url, borrower_job_title, expected_return_at,
                 request_type, status, requested_at, handled_at, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, 'change', 'pending', ?, NULL, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'change', 'pending', ?, NULL, ?, ?)
             """,
             (
                 device_id,
                 row["model"],
-                payload.borrower_name.strip(),
+                *_borrower_values(borrower_profile),
                 expected_return.isoformat(),
                 request_now,
                 request_now,
@@ -927,7 +1127,7 @@ async def change_borrower(
         f"设备: {row['model']}\n"
         f"变更前借用人: {old_borrower or '-'}\n"
         f"变更前归还时间: {_format_notify_time(old_expected)}\n"
-        f"变更后借用人: {payload.borrower_name.strip()}\n"
+        f"变更后借用人: {borrower_profile['name']}\n"
         f"变更后预期归还时间: {_format_notify_time(expected_return)}\n"
         f"变更时间: {_format_notify_time(now)}"
     )
@@ -952,6 +1152,10 @@ async def return_device(device_id: int, background_tasks: BackgroundTasks):
             UPDATE devices SET
                 loan_status = 'available',
                 borrower_name = NULL,
+                borrower_user_id = NULL,
+                borrower_open_id = NULL,
+                borrower_avatar_url = NULL,
+                borrower_job_title = NULL,
                 borrowed_at = NULL,
                 expected_return_at = NULL,
                 overdue_notified = 0,
@@ -999,7 +1203,11 @@ async def approve_borrow_request(request_id: int, background_tasks: BackgroundTa
         if request["status"] != "pending":
             raise HTTPException(status_code=400, detail="申请已处理")
         device = conn.execute(
-            "SELECT loan_status, model, borrower_name, expected_return_at FROM devices WHERE id = ?",
+            """
+            SELECT loan_status, model, borrower_name, borrower_user_id, borrower_open_id,
+                   borrower_avatar_url, borrower_job_title, expected_return_at
+            FROM devices WHERE id = ?
+            """,
             (request["device_id"],),
         ).fetchone()
         if not device:
@@ -1008,19 +1216,24 @@ async def approve_borrow_request(request_id: int, background_tasks: BackgroundTa
         if request["request_type"] == "change":
             if device["loan_status"] not in {"borrowed", "pending"}:
                 raise HTTPException(status_code=400, detail="设备状态异常")
-            old_borrower = device["borrower_name"]
             old_expected = device["expected_return_at"]
+            old_borrower_profile = _borrower_profile_from_row(device)
+            new_borrower_profile = _borrower_profile_from_row(request)
             conn.execute(
                 """
                 UPDATE devices SET
                     borrower_name = ?,
+                    borrower_user_id = ?,
+                    borrower_open_id = ?,
+                    borrower_avatar_url = ?,
+                    borrower_job_title = ?,
                     expected_return_at = ?,
                     overdue_notified = 0,
                     updated_at = ?
                 WHERE id = ?
                 """,
                 (
-                    request["borrower_name"],
+                    *_borrower_values(new_borrower_profile),
                     request["expected_return_at"],
                     now_iso(),
                     request["device_id"],
@@ -1053,11 +1266,17 @@ async def approve_borrow_request(request_id: int, background_tasks: BackgroundTa
                     conn.execute(
                         """
                         UPDATE borrow_requests
-                        SET borrower_name = ?, expected_return_at = ?, updated_at = ?
+                        SET borrower_name = ?,
+                            borrower_user_id = ?,
+                            borrower_open_id = ?,
+                            borrower_avatar_url = ?,
+                            borrower_job_title = ?,
+                            expected_return_at = ?,
+                            updated_at = ?
                         WHERE id = ?
                         """,
                         (
-                            request["borrower_name"],
+                            *_borrower_values(new_borrower_profile),
                             request["expected_return_at"],
                             now_iso(),
                             borrow_request_id,
@@ -1067,11 +1286,17 @@ async def approve_borrow_request(request_id: int, background_tasks: BackgroundTa
                 conn.execute(
                     """
                     UPDATE borrow_records
-                    SET borrower_name = ?, expected_return_at = ?, updated_at = ?
+                    SET borrower_name = ?,
+                        borrower_user_id = ?,
+                        borrower_open_id = ?,
+                        borrower_avatar_url = ?,
+                        borrower_job_title = ?,
+                        expected_return_at = ?,
+                        updated_at = ?
                     WHERE id = ?
                     """,
                     (
-                        request["borrower_name"],
+                        *_borrower_values(new_borrower_profile),
                         request["expected_return_at"],
                         now_iso(),
                         record_id,
@@ -1082,16 +1307,20 @@ async def approve_borrow_request(request_id: int, background_tasks: BackgroundTa
                 conn.execute(
                     """
                     INSERT INTO borrow_changes (
-                        device_id, record_id, request_id, borrower_before, borrower_after,
+                        device_id, record_id, request_id,
+                        borrower_before, borrower_before_user_id, borrower_before_open_id,
+                        borrower_before_avatar_url, borrower_before_job_title,
+                        borrower_after, borrower_after_user_id, borrower_after_open_id,
+                        borrower_after_avatar_url, borrower_after_job_title,
                         expected_before, expected_after, changed_at, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         request["device_id"],
                         record_id,
                         borrow_request_id or change_request_id,
-                        old_borrower,
-                        request["borrower_name"],
+                        *_borrower_values(old_borrower_profile),
+                        *_borrower_values(new_borrower_profile),
                         old_expected,
                         request["expected_return_at"],
                         now_str,
@@ -1116,6 +1345,10 @@ async def approve_borrow_request(request_id: int, background_tasks: BackgroundTa
                 UPDATE devices SET
                     loan_status = 'borrowed',
                     borrower_name = ?,
+                    borrower_user_id = ?,
+                    borrower_open_id = ?,
+                    borrower_avatar_url = ?,
+                    borrower_job_title = ?,
                     borrowed_at = ?,
                     expected_return_at = ?,
                     overdue_notified = 0,
@@ -1123,7 +1356,7 @@ async def approve_borrow_request(request_id: int, background_tasks: BackgroundTa
                 WHERE id = ?
                 """,
                 (
-                    request["borrower_name"],
+                    *_borrower_values(_borrower_profile_from_row(request)),
                     borrowed_at,
                     request["expected_return_at"],
                     now_iso(),
@@ -1142,7 +1375,7 @@ async def approve_borrow_request(request_id: int, background_tasks: BackgroundTa
                 conn,
                 request["device_id"],
                 request["device_model"],
-                request["borrower_name"],
+                _borrower_profile_from_row(request),
                 borrowed_at,
                 request["expected_return_at"],
                 request_id,
@@ -1194,6 +1427,10 @@ async def cancel_borrow_request(request_id: int):
                 UPDATE devices SET
                     loan_status = 'available',
                     borrower_name = NULL,
+                    borrower_user_id = NULL,
+                    borrower_open_id = NULL,
+                    borrower_avatar_url = NULL,
+                    borrower_job_title = NULL,
                     borrowed_at = NULL,
                     expected_return_at = NULL,
                     overdue_notified = 0,
