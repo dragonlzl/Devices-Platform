@@ -10,6 +10,10 @@ function getInitial(name: string) {
   return trimmed ? trimmed.slice(0, 1) : undefined;
 }
 
+function cleanOptionalString(value: unknown) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
 export function personFromBorrower(record: {
   borrower_name?: unknown;
   borrower_avatar_url?: unknown;
@@ -21,8 +25,8 @@ export function personFromBorrower(record: {
   }
   return {
     name,
-    avatar_url: typeof record.borrower_avatar_url === 'string' ? record.borrower_avatar_url : null,
-    job_title: typeof record.borrower_job_title === 'string' ? record.borrower_job_title : null,
+    avatar_url: cleanOptionalString(record.borrower_avatar_url),
+    job_title: cleanOptionalString(record.borrower_job_title),
   };
 }
 
@@ -46,8 +50,8 @@ export function personFromChange(
   }
   return {
     name,
-    avatar_url: typeof record[avatarKey] === 'string' ? record[avatarKey] : null,
-    job_title: typeof record[jobTitleKey] === 'string' ? record[jobTitleKey] : null,
+    avatar_url: cleanOptionalString(record[avatarKey]),
+    job_title: cleanOptionalString(record[jobTitleKey]),
   };
 }
 
@@ -67,16 +71,19 @@ export default function PersonDisplay(props: {
   const avatarSize = size === 'medium' ? 40 : size === 'small' ? 28 : 22;
   const jobTitle = props.showJobTitle ? getJobTitleText(props.person) : '';
   const initial = getInitial(name);
+  const avatarUrl = cleanOptionalString(props.person?.avatar_url);
+  const identityKey = [name, avatarUrl || '', jobTitle].join('|');
 
   return (
     <div className={`person-display person-display-${size} ${props.className || ''}`.trim()}>
       <Avatar
+        key={identityKey}
         size={avatarSize}
-        src={props.person?.avatar_url || undefined}
-        icon={!props.person?.avatar_url && !initial ? <UserOutlined /> : undefined}
+        src={avatarUrl || undefined}
+        icon={!avatarUrl && !initial ? <UserOutlined /> : undefined}
         className="person-display-avatar"
       >
-        {!props.person?.avatar_url ? initial : null}
+        {!avatarUrl ? initial : null}
       </Avatar>
       <div className="person-display-text">
         <Typography.Text strong className="person-display-name" title={name}>

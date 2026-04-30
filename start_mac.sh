@@ -7,6 +7,13 @@ cd "$SCRIPT_DIR"
 PORT="${1:-8090}"
 DB_FILE="${2:-app.db}"
 
+if [[ -f ".env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source ".env"
+  set +a
+fi
+
 export APP_DB_FILE="$DB_FILE"
 if [[ -f "requirements.txt" ]]; then
   echo "Checking dependencies in requirements.txt..."

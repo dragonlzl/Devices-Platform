@@ -37,6 +37,12 @@ if "%PORT%"=="" set PORT=8090
 set DB_FILE=%2
 if "%DB_FILE%"=="" set DB_FILE=app.db
 
+if exist ".env" (
+  for /f "usebackq tokens=1,* delims==" %%A in (".env") do (
+    if not "%%A"=="" if not "%%A:~0,1%"=="#" set "%%A=%%B"
+  )
+)
+
 set REQUIREMENTS=requirements.txt
 if exist "%REQUIREMENTS%" (
   echo Checking dependencies in %REQUIREMENTS%...

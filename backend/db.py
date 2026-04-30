@@ -62,6 +62,48 @@ def _ensure_person_snapshot_columns(conn: sqlite3.Connection) -> None:
     )
 
 
+def _ensure_overdue_notification_table(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS overdue_notifications (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            device_id INTEGER NOT NULL,
+            borrow_record_id INTEGER NOT NULL,
+            borrower_user_id TEXT,
+            borrower_name TEXT,
+            device_model TEXT NOT NULL,
+            requested_at TEXT,
+            expected_return_at TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending',
+            last_error_code TEXT,
+            last_error_message TEXT,
+            last_error_status INTEGER,
+            webhook_sent_at TEXT,
+            webhook_last_error_message TEXT,
+            sent_at TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            FOREIGN KEY (device_id) REFERENCES devices(id),
+            FOREIGN KEY (borrow_record_id) REFERENCES borrow_records(id)
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_overdue_notifications_snapshot
+        ON overdue_notifications (borrow_record_id, borrower_user_id, expected_return_at)
+        """
+    )
+    _ensure_columns(
+        conn,
+        "overdue_notifications",
+        {
+            "webhook_sent_at": "TEXT",
+            "webhook_last_error_message": "TEXT",
+        },
+    )
+
+
 @contextmanager
 def db_session():
     conn = connect_db()
@@ -210,3 +252,4 @@ def init_db() -> None:
             """
         )
         _ensure_person_snapshot_columns(conn)
+        _ensure_overdue_notification_table(conn)

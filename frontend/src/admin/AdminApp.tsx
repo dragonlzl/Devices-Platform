@@ -1405,10 +1405,12 @@ export default function AdminApp(props: { currentUser: PortalUser }) {
         method: 'POST',
       });
       message.success(res.message || (record.request_type === 'change' ? '借用人变更成功' : '确认借出成功'));
-      loadBorrowRequests(pendingQuery.trim() || undefined);
-      loadDevices();
-      loadBorrowRecords(recordsQuery.trim() || undefined);
-      refreshPendingCount();
+      await Promise.all([
+        loadBorrowRequests(pendingQuery.trim() || undefined),
+        loadDevices(query.trim() || undefined),
+        loadBorrowRecords(recordsQuery.trim() || undefined),
+        refreshPendingCount(),
+      ]);
     } catch (err) {
       message.error((err as Error).message);
     }
@@ -1418,9 +1420,11 @@ export default function AdminApp(props: { currentUser: PortalUser }) {
     try {
       await apiRequest(`/api/borrow-requests/${record.id}/cancel`, { method: 'POST' });
       message.success('取消成功');
-      loadBorrowRequests(pendingQuery.trim() || undefined);
-      loadDevices();
-      refreshPendingCount();
+      await Promise.all([
+        loadBorrowRequests(pendingQuery.trim() || undefined),
+        loadDevices(query.trim() || undefined),
+        refreshPendingCount(),
+      ]);
     } catch (err) {
       message.error((err as Error).message);
     }

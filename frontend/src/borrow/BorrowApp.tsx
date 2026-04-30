@@ -341,14 +341,7 @@ export default function BorrowApp(props: { currentUser: PortalUser }) {
           .map((item) => {
             const fresh = latest.get(item.id);
             if (!fresh) return item;
-            return {
-              ...item,
-              status: fresh.status,
-              loan_status: fresh.loan_status,
-              borrower_name: fresh.borrower_name,
-              borrowed_at: fresh.borrowed_at,
-              expected_return_at: fresh.expected_return_at,
-            };
+            return fresh;
           })
       );
     } catch {

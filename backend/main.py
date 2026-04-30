@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 import re
 from io import BytesIO
 from datetime import datetime, timedelta, timezone
@@ -16,7 +17,7 @@ from openpyxl import Workbook
 
 from .db import db_session, init_db, now_iso
 from .llm import LLMError, call_llm
-from .notify import NotifyError, send_feishu_message
+from .notify import NotifyError, PortalNotificationError, send_feishu_message, send_portal_notification
 from .schemas import (
     BorrowRequest,
     BorrowerChangeRequest,
@@ -43,10 +44,32 @@ from .schemas import (
 BASE_DIR = Path(__file__).resolve()
 BACKEND_DIR = BASE_DIR.parent
 REPO_DIR = BACKEND_DIR.parent
+
+
+def _load_env_file(path: Path) -> None:
+    if not path.exists():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_env_file(REPO_DIR / ".env")
+
 PORTAL_JWT_VERIFY_URL = os.environ.get(
     "PORTAL_JWT_VERIFY_URL",
     "http://192.168.50.10:8756/api/sso/jwt/verify",
 )
+DEFAULT_PORTAL_NOTIFICATION_SERVICE_ID = "device-borrow-service"
+PORTAL_NOTIFICATION_SERVICE_ID_ENV = "PORTAL_NOTIFICATION_SERVICE_ID"
+PORTAL_NOTIFICATION_SERVICE_TOKEN_ENV = "PORTAL_NOTIFICATION_SERVICE_TOKEN"
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 app.add_middleware(
@@ -246,6 +269,144 @@ async def _resolve_borrower_profile(request: Request, fallback_name: Optional[st
         return await _require_portal_borrower_profile(request)
     _ensure_required(fallback_name, "借用人名字")
     return _legacy_borrower_profile(fallback_name)
+
+
+def _portal_notification_auth_from_request(request: Request) -> Dict[str, Optional[str]]:
+    token = _get_portal_token(request)
+    if token:
+        return {"portal_jwt": token, "cookie": None}
+    cookie = request.headers.get("cookie", "").strip()
+    return {"portal_jwt": None, "cookie": cookie or None}
+
+
+def _portal_notification_auth_from_job() -> Dict[str, Optional[str]]:
+    service_id = os.environ.get(PORTAL_NOTIFICATION_SERVICE_ID_ENV, DEFAULT_PORTAL_NOTIFICATION_SERVICE_ID).strip()
+    service_token = os.environ.get(PORTAL_NOTIFICATION_SERVICE_TOKEN_ENV, "").strip()
+    return {
+        "service_id": service_id or DEFAULT_PORTAL_NOTIFICATION_SERVICE_ID,
+        "service_token": service_token or None,
+        "source": "service" if service_token else "none",
+    }
+
+
+def _sanitize_error_message(value: Any) -> str:
+    message = str(value or "").strip()
+    message = re.sub(r"Bearer\s+[^\s,;]+", "Bearer <redacted>", message, flags=re.IGNORECASE)
+    message = re.sub(r"(Authorization\s*[:=]\s*)[^\s,;]+", r"\1<redacted>", message, flags=re.IGNORECASE)
+    message = re.sub(r"(Cookie\s*[:=]\s*)[^,;]+", r"\1<redacted>", message, flags=re.IGNORECASE)
+    message = re.sub(r"(portal_jwt\s*[:=]\s*)[^\s,;]+", r"\1<redacted>", message, flags=re.IGNORECASE)
+    return message[:300] if message else "门户通知发送失败"
+
+
+def _portal_error_parts(exc: PortalNotificationError) -> tuple:
+    return exc.status_code, exc.code, _sanitize_error_message(exc.message)
+
+
+def _log_portal_notification_error(context: str, exc: PortalNotificationError) -> None:
+    status_code, code, message = _portal_error_parts(exc)
+    logger.warning(
+        "门户通知发送失败: context=%s status=%s code=%s message=%s",
+        context,
+        status_code,
+        code,
+        message,
+    )
+
+
+def _build_portal_card_payload(
+    *,
+    borrower: Optional[str],
+    device_name: Optional[str],
+    request_date: Optional[Union[str, datetime]],
+    return_date: Optional[Union[str, datetime]],
+    status: str,
+    card_color: str,
+    status_color: str,
+    card_title: str,
+) -> Dict[str, Any]:
+    return {
+        "borrower": borrower or "-",
+        "device_name": device_name or "-",
+        "request_date": _format_notify_time(request_date),
+        "return_date": _format_notify_time(return_date),
+        "status": status,
+        "card_color": card_color,
+        "status_color": status_color,
+        "card_title": card_title,
+    }
+
+
+async def _queue_portal_notification(
+    context: str,
+    recipient_user_id: Optional[str],
+    payload: Dict[str, Any],
+    portal_jwt: Optional[str],
+    cookie: Optional[str],
+) -> None:
+    client: httpx.AsyncClient = app.state.http_client
+    try:
+        await send_portal_notification(
+            client,
+            recipient_user_id=recipient_user_id or "",
+            payload=payload,
+            portal_jwt=portal_jwt,
+            cookie=cookie,
+        )
+    except PortalNotificationError as exc:
+        _log_portal_notification_error(context, exc)
+    except Exception:
+        logger.warning("门户通知发送失败: context=%s status=%s code=%s message=%s", context, None, "UNEXPECTED_ERROR", "未知错误")
+
+
+def _add_portal_notification_task(
+    background_tasks: BackgroundTasks,
+    *,
+    context: str,
+    recipient_user_id: Optional[str],
+    payload: Dict[str, Any],
+    auth: Dict[str, Optional[str]],
+) -> None:
+    background_tasks.add_task(
+        _queue_portal_notification,
+        context,
+        recipient_user_id,
+        payload,
+        auth.get("portal_jwt"),
+        auth.get("cookie"),
+    )
+
+
+def _fetch_current_borrow_context(conn, device_id: int) -> Dict[str, Any]:
+    record = conn.execute(
+        """
+        SELECT br.id AS borrow_record_id, br.request_id, br.borrowed_at, br.expected_return_at,
+               br.borrower_name, br.borrower_user_id, rq.requested_at
+        FROM borrow_records br
+        LEFT JOIN borrow_requests rq ON rq.id = br.request_id
+        WHERE br.device_id = ? AND br.returned_at IS NULL
+        ORDER BY br.borrowed_at DESC
+        LIMIT 1
+        """,
+        (device_id,),
+    ).fetchone()
+    if record:
+        return dict(record)
+    request = conn.execute(
+        """
+        SELECT NULL AS borrow_record_id, br.id AS request_id, NULL AS borrowed_at, br.expected_return_at,
+               br.borrower_name, br.borrower_user_id, br.requested_at
+        FROM borrow_requests br
+        WHERE br.device_id = ? AND br.request_type = 'borrow' AND br.status = 'pending'
+        ORDER BY br.requested_at DESC
+        LIMIT 1
+        """,
+        (device_id,),
+    ).fetchone()
+    return dict(request) if request else {}
+
+
+def _borrow_context_request_date(context: Dict[str, Any], fallback: Optional[Union[str, datetime]] = None) -> Optional[Union[str, datetime]]:
+    return context.get("requested_at") or context.get("borrowed_at") or fallback
 
 
 def _get_int_setting(conn, key: str) -> Optional[int]:
@@ -571,6 +732,339 @@ def _filter_ai_devices(devices: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return devices
 
 
+def _upsert_pending_overdue_notifications(conn, now: datetime) -> None:
+    rows = conn.execute(
+        """
+        SELECT d.id AS device_id, d.model AS device_model, d.borrower_name, d.borrower_user_id,
+               d.expected_return_at, br.id AS borrow_record_id, br.borrowed_at, rq.requested_at
+        FROM devices d
+        JOIN borrow_records br ON br.id = (
+            SELECT id FROM borrow_records
+            WHERE device_id = d.id AND returned_at IS NULL
+            ORDER BY borrowed_at DESC
+            LIMIT 1
+        )
+        LEFT JOIN borrow_requests rq ON rq.id = br.request_id
+        WHERE d.loan_status = 'borrowed'
+          AND d.expected_return_at IS NOT NULL
+          AND d.overdue_notified = 0
+        """
+    ).fetchall()
+    for row in rows:
+        try:
+            expected = _parse_datetime(row["expected_return_at"])
+        except HTTPException:
+            continue
+        if expected >= now:
+            continue
+        borrower_user_id = _clean_text(row["borrower_user_id"])
+        borrower_name = _clean_text(row["borrower_name"])
+        current = now_iso()
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO overdue_notifications (
+                device_id, borrow_record_id, borrower_user_id, borrower_name, device_model,
+                requested_at, expected_return_at, status, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+            """,
+            (
+                row["device_id"],
+                row["borrow_record_id"],
+                borrower_user_id,
+                borrower_name,
+                row["device_model"],
+                row["requested_at"] or row["borrowed_at"],
+                row["expected_return_at"],
+                current,
+                current,
+            ),
+        )
+
+
+def _is_overdue_snapshot_current(conn, notification: Dict[str, Any], now: datetime, *, require_recipient: bool = True) -> bool:
+    recipient = _clean_text(notification.get("borrower_user_id"))
+    borrower_name = _clean_text(notification.get("borrower_name"))
+    if not borrower_name:
+        return False
+    if require_recipient and not recipient:
+        return False
+    try:
+        expected = _parse_datetime(notification["expected_return_at"])
+    except HTTPException:
+        return False
+    if expected >= now:
+        return False
+    current = conn.execute(
+        """
+        SELECT d.id
+        FROM devices d
+        JOIN borrow_records br ON br.id = ? AND br.device_id = d.id AND br.returned_at IS NULL
+        WHERE d.id = ?
+          AND d.loan_status = 'borrowed'
+          AND d.expected_return_at = ?
+          AND d.borrower_name IS NOT NULL
+          AND TRIM(d.borrower_name) <> ''
+          AND d.borrower_name = ?
+        """,
+        (
+            notification["borrow_record_id"],
+            notification["device_id"],
+            notification["expected_return_at"],
+            borrower_name,
+        ),
+    ).fetchone()
+    if current is None:
+        return False
+    if require_recipient:
+        device_recipient = conn.execute(
+            "SELECT COALESCE(borrower_user_id, '') AS borrower_user_id FROM devices WHERE id = ?",
+            (notification["device_id"],),
+        ).fetchone()
+        return device_recipient is not None and device_recipient["borrower_user_id"] == recipient
+    return True
+
+
+def _mark_overdue_notification_skipped(conn, notification_id: int, code: str, message: str) -> None:
+    conn.execute(
+        """
+        UPDATE overdue_notifications
+        SET status = 'skipped', last_error_code = ?, last_error_message = ?,
+            last_error_status = NULL, updated_at = ?
+        WHERE id = ? AND status = 'pending'
+        """,
+        (code, _sanitize_error_message(message), now_iso(), notification_id),
+    )
+
+
+def _record_overdue_notification_error(conn, notification_id: int, exc: PortalNotificationError) -> None:
+    status_code, code, message = _portal_error_parts(exc)
+    next_status = "failed" if status_code == 400 else "pending"
+    conn.execute(
+        """
+        UPDATE overdue_notifications
+        SET status = ?, last_error_code = ?, last_error_message = ?,
+            last_error_status = ?, updated_at = ?
+        WHERE id = ? AND status = 'pending'
+        """,
+        (next_status, code, message, status_code, now_iso(), notification_id),
+    )
+
+
+def _record_overdue_auth_missing(conn) -> None:
+    conn.execute(
+        """
+        UPDATE overdue_notifications
+        SET last_error_code = 'NOTIFICATION_AUTH_REQUIRED',
+            last_error_message = '缺少门户通知定时任务鉴权凭证',
+            last_error_status = 401,
+            updated_at = ?
+        WHERE status = 'pending'
+        """,
+        (now_iso(),),
+    )
+
+
+def _pending_overdue_webhook_notifications(conn, now: datetime) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT id, device_id, borrow_record_id, borrower_user_id, borrower_name,
+               device_model, requested_at, expected_return_at
+        FROM overdue_notifications
+        WHERE status = 'pending' AND webhook_sent_at IS NULL
+        ORDER BY created_at ASC
+        """
+    ).fetchall()
+    pending = []
+    for row in rows:
+        item = dict(row)
+        if _is_overdue_snapshot_current(conn, item, now, require_recipient=False):
+            pending.append(item)
+            continue
+        _mark_overdue_notification_skipped(
+            conn,
+            item["id"],
+            "OVERDUE_NOTIFICATION_STALE",
+            "逾期通知快照已失效",
+        )
+    return pending
+
+
+def _mark_overdue_webhook_sent(conn, notification: Dict[str, Any], sent_at: str) -> None:
+    conn.execute(
+        """
+        UPDATE overdue_notifications
+        SET webhook_sent_at = ?, webhook_last_error_message = NULL, updated_at = ?
+        WHERE id = ? AND webhook_sent_at IS NULL
+        """,
+        (sent_at, sent_at, notification["id"]),
+    )
+    conn.execute(
+        "UPDATE devices SET overdue_notified = 1, updated_at = ? WHERE id = ?",
+        (sent_at, notification["device_id"]),
+    )
+
+
+def _record_overdue_webhook_error(conn, notification_id: int, message: str) -> None:
+    conn.execute(
+        """
+        UPDATE overdue_notifications
+        SET webhook_last_error_message = ?, updated_at = ?
+        WHERE id = ? AND webhook_sent_at IS NULL
+        """,
+        (_sanitize_error_message(message), now_iso(), notification_id),
+    )
+
+
+def _mark_overdue_notification_sent(conn, notification: Dict[str, Any], sent_at: str) -> bool:
+    now = _parse_datetime(sent_at)
+    if not _is_overdue_snapshot_current(conn, notification, now):
+        _mark_overdue_notification_skipped(
+            conn,
+            notification["id"],
+            "OVERDUE_NOTIFICATION_STALE",
+            "逾期通知快照已失效",
+        )
+        return False
+    cur = conn.execute(
+        """
+        UPDATE overdue_notifications
+        SET status = 'sent', sent_at = ?, last_error_code = NULL, last_error_message = NULL,
+            last_error_status = NULL, updated_at = ?
+        WHERE id = ? AND status = 'pending'
+        """,
+        (sent_at, sent_at, notification["id"]),
+    )
+    if cur.rowcount == 0:
+        return False
+    conn.execute(
+        "UPDATE devices SET overdue_notified = 1, updated_at = ? WHERE id = ?",
+        (sent_at, notification["device_id"]),
+    )
+    return True
+
+
+def _pending_overdue_notifications(conn, now: datetime) -> List[Dict[str, Any]]:
+    rows = conn.execute(
+        """
+        SELECT id, device_id, borrow_record_id, borrower_user_id, borrower_name,
+               device_model, requested_at, expected_return_at
+        FROM overdue_notifications
+        WHERE status = 'pending'
+        ORDER BY created_at ASC
+        """
+    ).fetchall()
+    pending = []
+    for row in rows:
+        item = dict(row)
+        if _is_overdue_snapshot_current(conn, item, now):
+            pending.append(item)
+            continue
+        _mark_overdue_notification_skipped(
+            conn,
+            item["id"],
+            "OVERDUE_NOTIFICATION_STALE",
+            "逾期通知快照已失效",
+        )
+    return pending
+
+
+async def _send_overdue_webhook_notifications(items: List[Dict[str, Any]]) -> None:
+    with db_session() as conn:
+        webhook = _get_setting(conn, "feishu_webhook")
+    if not webhook:
+        return
+    client: httpx.AsyncClient = app.state.http_client
+    for item in items:
+        body = (
+            f"借用人名字: {item['borrower_name'] or '-'}\n"
+            f"借用的设备型号: {item['device_model']}\n"
+            f"预计归还时间: {_format_notify_time(item['expected_return_at'])}\n"
+            "借用时间已逾期"
+        )
+        try:
+            await send_feishu_message(client, webhook, "逾期通知", body)
+        except Exception as exc:
+            logger.warning("旧飞书逾期通知发送失败: notification_id=%s", item["id"])
+            with db_session() as conn:
+                _record_overdue_webhook_error(conn, item["id"], str(exc))
+            continue
+        sent_at = now_iso()
+        with db_session() as conn:
+            if _is_overdue_snapshot_current(conn, item, _parse_datetime(sent_at), require_recipient=False):
+                _mark_overdue_webhook_sent(conn, item, sent_at)
+
+
+async def _process_overdue_notifications_once(now: Optional[datetime] = None) -> None:
+    checked_at = now or datetime.now(timezone.utc)
+    with db_session() as conn:
+        _upsert_pending_overdue_notifications(conn, checked_at)
+        webhook_pending = _pending_overdue_webhook_notifications(conn, checked_at)
+        pending = _pending_overdue_notifications(conn, checked_at)
+        auth = _portal_notification_auth_from_job()
+        portal_auth_missing = pending and not auth.get("service_token")
+        if portal_auth_missing:
+            _record_overdue_auth_missing(conn)
+
+    await _send_overdue_webhook_notifications(webhook_pending)
+    if portal_auth_missing:
+        return
+    if not pending:
+        return
+
+    client: httpx.AsyncClient = app.state.http_client
+    for item in pending:
+        payload = _build_portal_card_payload(
+            borrower=item["borrower_name"],
+            device_name=item["device_model"],
+            request_date=item["requested_at"],
+            return_date=item["expected_return_at"],
+            status="归还逾期，请及时归还，如需继续使用，请到平台点击延期",
+            card_color="orange",
+            status_color="orange",
+            card_title="设备借用逾期",
+        )
+        try:
+            await send_portal_notification(
+                client,
+                recipient_user_id=item["borrower_user_id"] or "",
+                payload=payload,
+                service_id=auth.get("service_id"),
+                service_token=auth.get("service_token"),
+            )
+        except PortalNotificationError as exc:
+            _log_portal_notification_error("overdue", exc)
+            with db_session() as conn:
+                _record_overdue_notification_error(conn, item["id"], exc)
+            continue
+        sent_at = now_iso()
+        with db_session() as conn:
+            _mark_overdue_notification_sent(conn, item, sent_at)
+
+
+def _overdue_notification_status_summary(conn) -> Dict[str, Any]:
+    rows = conn.execute(
+        """
+        SELECT status, COUNT(1) AS count
+        FROM overdue_notifications
+        GROUP BY status
+        """
+    ).fetchall()
+    recent = conn.execute(
+        """
+        SELECT id, device_id, borrower_name, device_model, expected_return_at, status,
+               last_error_code, last_error_message, last_error_status,
+               webhook_sent_at, webhook_last_error_message, sent_at, updated_at
+        FROM overdue_notifications
+        ORDER BY updated_at DESC
+        LIMIT 20
+        """
+    ).fetchall()
+    return {
+        "items_by_status": {row["status"]: row["count"] for row in rows},
+        "recent_items": [dict(row) for row in recent],
+    }
+
+
 async def _queue_notify(title: str, body: str):
     webhook = None
     with db_session() as conn:
@@ -583,48 +1077,20 @@ async def _queue_notify(title: str, body: str):
     except NotifyError:
         # 避免通知失败影响主流程
         return
+    except Exception:
+        logger.warning("旧飞书通知发送失败: title=%s", title)
+        return
 
 
 async def _overdue_worker():
     while True:
         try:
             await asyncio.sleep(60)
-            now = datetime.now(timezone.utc)
-            with db_session() as conn:
-                rows = conn.execute(
-                    "SELECT d.id, d.model, d.borrower_name, d.expected_return_at "
-                    "FROM devices d "
-                    "WHERE d.loan_status = 'borrowed' AND d.expected_return_at IS NOT NULL AND d.overdue_notified = 0"
-                ).fetchall()
-                overdue = []
-                for row in rows:
-                    expected = _parse_datetime(row["expected_return_at"])
-                    if expected < now:
-                        overdue.append(row)
-                if not overdue:
-                    continue
-                webhook = _get_setting(conn, "feishu_webhook")
-                if not webhook:
-                    continue
-                client: httpx.AsyncClient = app.state.http_client
-                for row in overdue:
-                    body = (
-                        f"借用人名字: {row['borrower_name'] or '-'}\n"
-                        f"借用的设备型号: {row['model']}\n"
-                        f"预计归还时间: {_format_notify_time(row['expected_return_at'])}\n"
-                        "借用时间已逾期"
-                    )
-                    try:
-                        await send_feishu_message(client, webhook, "逾期通知", body)
-                    except NotifyError:
-                        continue
-                    conn.execute(
-                        "UPDATE devices SET overdue_notified = 1, updated_at = ? WHERE id = ?",
-                        (now_iso(), row["id"]),
-                    )
+            await _process_overdue_notifications_once()
         except asyncio.CancelledError:
             break
         except Exception:
+            logger.warning("逾期通知任务执行失败", exc_info=True)
             continue
 
 
@@ -962,6 +1428,7 @@ async def delete_device(device_id: int):
 @app.post("/api/devices/{device_id}/borrow")
 async def borrow_device(device_id: int, payload: BorrowRequest, background_tasks: BackgroundTasks, request: Request):
     borrower_profile = await _resolve_borrower_profile(request, payload.borrower_name)
+    portal_auth = _portal_notification_auth_from_request(request)
     _ensure_required(borrower_profile["name"], "借用人名字")
     expected_return = _parse_datetime(payload.expected_return_at)
     now = datetime.now(timezone.utc)
@@ -1030,15 +1497,32 @@ async def borrow_device(device_id: int, payload: BorrowRequest, background_tasks
         "待借设备"
     )
     background_tasks.add_task(_queue_notify, "待借通知", body)
+    _add_portal_notification_task(
+        background_tasks,
+        context="borrow_submit",
+        recipient_user_id=borrower_profile.get("user_id"),
+        payload=_build_portal_card_payload(
+            borrower=borrower_profile["name"],
+            device_name=row["model"],
+            request_date=request_now,
+            return_date=expected_return,
+            status="待管理员确认设备状态",
+            card_color="blue",
+            status_color="yellow",
+            card_title="借用申请已提交",
+        ),
+        auth=portal_auth,
+    )
     return {"message": "已提交待借申请", "request_id": cur.lastrowid}
 
 
 @app.post("/api/devices/{device_id}/extend")
-async def extend_device(device_id: int, payload: ExtendRequest, background_tasks: BackgroundTasks):
+async def extend_device(device_id: int, payload: ExtendRequest, background_tasks: BackgroundTasks, request: Request):
+    portal_auth = _portal_notification_auth_from_request(request)
     expected_return = _parse_datetime(payload.expected_return_at)
     with db_session() as conn:
         row = conn.execute(
-            "SELECT loan_status, expected_return_at, borrower_name, model FROM devices WHERE id = ?",
+            "SELECT loan_status, expected_return_at, borrower_name, borrower_user_id, model FROM devices WHERE id = ?",
             (device_id,),
         ).fetchone()
         if not row:
@@ -1048,6 +1532,7 @@ async def extend_device(device_id: int, payload: ExtendRequest, background_tasks
         old_expected = _parse_datetime(row["expected_return_at"]) if row["expected_return_at"] else None
         if old_expected and expected_return <= old_expected:
             raise HTTPException(status_code=400, detail="延期时间必须晚于当前预计归还时间")
+        borrow_context = _fetch_current_borrow_context(conn, device_id)
         conn.execute(
             """
             UPDATE devices SET expected_return_at = ?, overdue_notified = 0, updated_at = ?
@@ -1063,6 +1548,22 @@ async def extend_device(device_id: int, payload: ExtendRequest, background_tasks
         f"变更为 预计归还时间(新): {_format_notify_time(expected_return)}"
     )
     background_tasks.add_task(_queue_notify, "延期通知", body)
+    _add_portal_notification_task(
+        background_tasks,
+        context="extend",
+        recipient_user_id=row["borrower_user_id"],
+        payload=_build_portal_card_payload(
+            borrower=row["borrower_name"] or "-",
+            device_name=row["model"],
+            request_date=_borrow_context_request_date(borrow_context),
+            return_date=expected_return,
+            status="归还时间延长成功",
+            card_color="green",
+            status_color="green",
+            card_title="归还时间延长成功",
+        ),
+        auth=portal_auth,
+    )
     return {"message": "延期成功"}
 
 
@@ -1071,6 +1572,7 @@ async def change_borrower(
     device_id: int, payload: BorrowerChangeRequest, background_tasks: BackgroundTasks, request: Request
 ):
     borrower_profile = await _resolve_borrower_profile(request, payload.borrower_name)
+    portal_auth = _portal_notification_auth_from_request(request)
     _ensure_required(borrower_profile["name"], "借用人名字")
     expected_return = _parse_datetime(payload.expected_return_at)
     now = datetime.now(timezone.utc)
@@ -1103,6 +1605,7 @@ async def change_borrower(
             raise HTTPException(status_code=400, detail="当前设备已有借用人更换申请，需等待管理员处理。")
         old_borrower = row["borrower_name"]
         old_expected = row["expected_return_at"]
+        old_borrow_context = _fetch_current_borrow_context(conn, device_id)
         request_now = now_iso()
         conn.execute(
             """
@@ -1132,21 +1635,55 @@ async def change_borrower(
         f"变更时间: {_format_notify_time(now)}"
     )
     background_tasks.add_task(_queue_notify, "借用人变更通知", body)
+    _add_portal_notification_task(
+        background_tasks,
+        context="change_borrower_submit_old",
+        recipient_user_id=row["borrower_user_id"],
+        payload=_build_portal_card_payload(
+            borrower=old_borrower,
+            device_name=row["model"],
+            request_date=_borrow_context_request_date(old_borrow_context),
+            return_date=old_expected,
+            status=f"待管理员确认，借用人将变为{borrower_profile['name']}",
+            card_color="blue",
+            status_color="yellow",
+            card_title="借用人变更申请",
+        ),
+        auth=portal_auth,
+    )
+    _add_portal_notification_task(
+        background_tasks,
+        context="change_borrower_submit_new",
+        recipient_user_id=borrower_profile.get("user_id"),
+        payload=_build_portal_card_payload(
+            borrower=borrower_profile["name"],
+            device_name=row["model"],
+            request_date=request_now,
+            return_date=expected_return,
+            status=f"待管理员确认，{old_borrower}将变为{borrower_profile['name']}",
+            card_color="blue",
+            status_color="yellow",
+            card_title="借用人变更申请",
+        ),
+        auth=portal_auth,
+    )
     return {"message": "已提交借用人变更申请"}
 
 
 @app.post("/api/devices/{device_id}/return")
-async def return_device(device_id: int, background_tasks: BackgroundTasks):
+async def return_device(device_id: int, background_tasks: BackgroundTasks, request: Request):
+    portal_auth = _portal_notification_auth_from_request(request)
     now = datetime.now(timezone.utc)
     with db_session() as conn:
         row = conn.execute(
-            "SELECT loan_status, borrower_name, model FROM devices WHERE id = ?",
+            "SELECT loan_status, borrower_name, borrower_user_id, model FROM devices WHERE id = ?",
             (device_id,),
         ).fetchone()
         if not row:
             raise HTTPException(status_code=404, detail="设备不存在")
         if row["loan_status"] != "borrowed":
             raise HTTPException(status_code=400, detail="设备未处于已借出状态")
+        borrow_context = _fetch_current_borrow_context(conn, device_id)
         conn.execute(
             """
             UPDATE devices SET
@@ -1172,6 +1709,22 @@ async def return_device(device_id: int, background_tasks: BackgroundTasks):
         "归还成功"
     )
     background_tasks.add_task(_queue_notify, "归还通知", body)
+    _add_portal_notification_task(
+        background_tasks,
+        context="return",
+        recipient_user_id=row["borrower_user_id"],
+        payload=_build_portal_card_payload(
+            borrower=row["borrower_name"] or "-",
+            device_name=row["model"],
+            request_date=_borrow_context_request_date(borrow_context),
+            return_date=now,
+            status="归还成功",
+            card_color="green",
+            status_color="green",
+            card_title="归还成功",
+        ),
+        auth=portal_auth,
+    )
     return {"message": "归还成功"}
 
 
@@ -1190,8 +1743,12 @@ async def list_borrow_requests(
 
 
 @app.post("/api/borrow-requests/{request_id}/approve")
-async def approve_borrow_request(request_id: int, background_tasks: BackgroundTasks):
+async def approve_borrow_request(request_id: int, background_tasks: BackgroundTasks, request_context: Request):
+    portal_auth = _portal_notification_auth_from_request(request_context)
     now = datetime.now(timezone.utc)
+    old_borrower_profile: Dict[str, Optional[str]] = {}
+    new_borrower_profile: Dict[str, Optional[str]] = {}
+    old_borrow_context: Dict[str, Any] = {}
     with db_session() as conn:
         request_row = conn.execute(
             "SELECT * FROM borrow_requests WHERE id = ?",
@@ -1219,6 +1776,7 @@ async def approve_borrow_request(request_id: int, background_tasks: BackgroundTa
             old_expected = device["expected_return_at"]
             old_borrower_profile = _borrower_profile_from_row(device)
             new_borrower_profile = _borrower_profile_from_row(request)
+            old_borrow_context = _fetch_current_borrow_context(conn, request["device_id"])
             conn.execute(
                 """
                 UPDATE devices SET
@@ -1388,6 +1946,38 @@ async def approve_borrow_request(request_id: int, background_tasks: BackgroundTa
             f"新的归还时间: {_format_notify_time(request['expected_return_at'])}"
         )
         background_tasks.add_task(_queue_notify, "借用人变更成功通知", body)
+        _add_portal_notification_task(
+            background_tasks,
+            context="change_borrower_approve_old",
+            recipient_user_id=old_borrower_profile.get("user_id"),
+            payload=_build_portal_card_payload(
+                borrower=old_borrower_profile.get("name"),
+                device_name=request["device_model"],
+                request_date=_borrow_context_request_date(old_borrow_context),
+                return_date=old_borrow_context.get("expected_return_at") or old_expected,
+                status=f"借用人已变为{new_borrower_profile.get('name') or request['borrower_name']}",
+                card_color="green",
+                status_color="green",
+                card_title="借用人变更成功",
+            ),
+            auth=portal_auth,
+        )
+        _add_portal_notification_task(
+            background_tasks,
+            context="change_borrower_approve_new",
+            recipient_user_id=new_borrower_profile.get("user_id"),
+            payload=_build_portal_card_payload(
+                borrower=new_borrower_profile.get("name"),
+                device_name=request["device_model"],
+                request_date=request["requested_at"],
+                return_date=request["expected_return_at"],
+                status=f"借用人已变为{new_borrower_profile.get('name') or request['borrower_name']}",
+                card_color="green",
+                status_color="green",
+                card_title="借用人变更成功",
+            ),
+            auth=portal_auth,
+        )
         return {"message": "借用人变更成功"}
 
     body = (
@@ -1398,12 +1988,31 @@ async def approve_borrow_request(request_id: int, background_tasks: BackgroundTa
         "借用成功"
     )
     background_tasks.add_task(_queue_notify, "借用通知", body)
+    _add_portal_notification_task(
+        background_tasks,
+        context="borrow_approve",
+        recipient_user_id=request["borrower_user_id"],
+        payload=_build_portal_card_payload(
+            borrower=request["borrower_name"],
+            device_name=request["device_model"],
+            request_date=request["requested_at"],
+            return_date=request["expected_return_at"],
+            status="借用成功，请联系 @林镇龙 领取设备",
+            card_color="green",
+            status_color="green",
+            card_title="借用成功",
+        ),
+        auth=portal_auth,
+    )
     return {"message": "确认借出成功"}
 
 
 @app.post("/api/borrow-requests/{request_id}/cancel")
-async def cancel_borrow_request(request_id: int):
+async def cancel_borrow_request(request_id: int, background_tasks: BackgroundTasks, request_context: Request):
+    portal_auth = _portal_notification_auth_from_request(request_context)
     now = now_iso()
+    device_context: Dict[str, Any] = {}
+    old_borrow_context: Dict[str, Any] = {}
     with db_session() as conn:
         request = conn.execute(
             "SELECT * FROM borrow_requests WHERE id = ?",
@@ -1413,6 +2022,15 @@ async def cancel_borrow_request(request_id: int):
             raise HTTPException(status_code=404, detail="申请不存在")
         if request["status"] != "pending":
             raise HTTPException(status_code=400, detail="申请已处理")
+        device = conn.execute(
+            """
+            SELECT borrower_name, borrower_user_id, expected_return_at, model
+            FROM devices WHERE id = ?
+            """,
+            (request["device_id"],),
+        ).fetchone()
+        device_context = dict(device) if device else {}
+        old_borrow_context = _fetch_current_borrow_context(conn, request["device_id"])
         conn.execute(
             """
             UPDATE borrow_requests
@@ -1439,6 +2057,58 @@ async def cancel_borrow_request(request_id: int):
                 """,
                 (now_iso(), request["device_id"]),
             )
+    if request["request_type"] == "change":
+        old_borrower_name = device_context.get("borrower_name") or "-"
+        new_borrower_name = request["borrower_name"]
+        _add_portal_notification_task(
+            background_tasks,
+            context="change_borrower_cancel_old",
+            recipient_user_id=device_context.get("borrower_user_id"),
+            payload=_build_portal_card_payload(
+                borrower=old_borrower_name,
+                device_name=request["device_model"],
+                request_date=_borrow_context_request_date(old_borrow_context),
+                return_date=device_context.get("expected_return_at"),
+                status="借用人变更失败",
+                card_color="red",
+                status_color="red",
+                card_title="借用人变更失败",
+            ),
+            auth=portal_auth,
+        )
+        _add_portal_notification_task(
+            background_tasks,
+            context="change_borrower_cancel_new",
+            recipient_user_id=request["borrower_user_id"],
+            payload=_build_portal_card_payload(
+                borrower=new_borrower_name,
+                device_name=request["device_model"],
+                request_date=request["requested_at"],
+                return_date=request["expected_return_at"],
+                status="借用人变更失败",
+                card_color="red",
+                status_color="red",
+                card_title="借用人变更失败",
+            ),
+            auth=portal_auth,
+        )
+    else:
+        _add_portal_notification_task(
+            background_tasks,
+            context="borrow_cancel",
+            recipient_user_id=request["borrower_user_id"],
+            payload=_build_portal_card_payload(
+                borrower=request["borrower_name"],
+                device_name=request["device_model"],
+                request_date=request["requested_at"],
+                return_date=request["expected_return_at"],
+                status="借用失败，目标设备状态异常，请选另一台设备",
+                card_color="red",
+                status_color="red",
+                card_title="借用失败",
+            ),
+            auth=portal_auth,
+        )
     return {"message": "取消成功"}
 
 
@@ -1524,6 +2194,19 @@ async def update_feishu_setting(payload: SettingUpdate):
     with db_session() as conn:
         _set_setting(conn, "feishu_webhook", payload.webhook_url.strip())
     return {"message": "保存成功"}
+
+
+@app.get("/api/notifications/overdue-status")
+async def get_overdue_notification_status():
+    auth = _portal_notification_auth_from_job()
+    with db_session() as conn:
+        summary = _overdue_notification_status_summary(conn)
+    return {
+        "service_id": auth.get("service_id"),
+        "service_token_configured": bool(os.environ.get(PORTAL_NOTIFICATION_SERVICE_TOKEN_ENV, "").strip()),
+        "auth_source": auth.get("source"),
+        **summary,
+    }
 
 
 @app.get("/api/llm/models")

@@ -57,6 +57,7 @@ APP_DB_FILE=app.db uvicorn backend.main:app --reload --host 0.0.0.0 --port 8090
 ## 配置说明
 - 数据库：通过 `APP_DB_FILE` 指定，如 `app.db` 或 `data/app.db`
 - 飞书配置：复制 `feishu_config.example.json` 为 `feishu_config.json` 并填写 Webhook
+- 门户逾期卡片通知：在后端启动环境或 `.env` 中配置 `PORTAL_NOTIFICATION_SERVICE_ID=device-borrow-service` 与 `PORTAL_NOTIFICATION_SERVICE_TOKEN=<门户服务凭证>`；`.env` 会被启动脚本和后端自动读取，且不要提交到仓库
 - 模型配置：在管理页“模型配置”中设置模型与指派（更快/更准）
 
 ## 注意事项
