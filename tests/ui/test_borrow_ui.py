@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timedelta
 
 import httpx
@@ -5,6 +6,53 @@ from playwright.sync_api import expect
 
 
 UNREGISTERED_BORROW_TIP = "未找到该设备的借用人，无法进行设备借用，请找回设备后，把状态改回“正常”。"
+TEST_PORTAL_USER = {
+    "user_id": "borrow-ui-test-user",
+    "open_id": "borrow-ui-test-open",
+    "name": "Borrow UI Tester",
+    "job_title": "测试",
+}
+
+
+def mock_portal_auth(page):
+    user_json = {
+        "user_id": TEST_PORTAL_USER["user_id"],
+        "open_id": TEST_PORTAL_USER["open_id"],
+        "name": TEST_PORTAL_USER["name"],
+        "job_title": TEST_PORTAL_USER["job_title"],
+    }
+    page.route(
+        "**/portal-auth.js*",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/javascript",
+            body=f"""
+                window.portalAuth = {{
+                  requireJwtUser: async () => ({user_json!r}),
+                  requireJwtSession: async () => ({{
+                    token: 'borrow-ui-test-token',
+                    audience: window.location.origin,
+                    user: {user_json!r},
+                  }}),
+                  getJwtSession: async () => ({{
+                    authenticated: true,
+                    token: 'borrow-ui-test-token',
+                    audience: window.location.origin,
+                    user: {user_json!r},
+                  }}),
+                  clearJwtSession: () => {{}},
+                }};
+            """,
+        ),
+    )
+    page.route(
+        "**/api/current-user/migrate-borrower-data",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body='{"message":"迁移完成","migrated":0}',
+        ),
+    )
 
 
 def seed_device(base_url, model="BorrowPhone", status="正常"):
@@ -62,6 +110,21 @@ def update_device_status(base_url, model, status):
                 "cpu": device.get("cpu"),
                 "boot_password": device.get("boot_password"),
                 "notes": device.get("notes"),
+            },
+        )
+        assert resp.status_code == 200
+
+
+def submit_borrow_request(base_url, model, borrower_name):
+    with httpx.Client(base_url=base_url) as client:
+        items = client.get("/api/devices").json()["items"]
+        device = next(item for item in items if item["model"] == model)
+        future_time = datetime.now() + timedelta(days=1)
+        resp = client.post(
+            f"/api/devices/{device['id']}/borrow",
+            json={
+                "borrower_name": borrower_name,
+                "expected_return_at": future_time.isoformat(),
             },
         )
         assert resp.status_code == 200
@@ -175,6 +238,27 @@ def test_broken_devices_hidden_on_borrow_page_and_normal_search(page, base_url):
     page.get_by_placeholder("输入型号/系统/厂商等关键词").fill("BrokenPhone")
     page.get_by_role("button", name="普通搜索").click()
     expect(page.locator("tbody tr", has_text="BrokenPhone")).to_have_count(0)
+
+
+def test_borrow_page_filters_my_devices_tab(page, base_url):
+    mock_portal_auth(page)
+    seed_device(base_url, model="MyBorrowedPhone")
+    seed_device(base_url, model="OtherBorrowedPhone")
+    submit_borrow_request(base_url, "MyBorrowedPhone", TEST_PORTAL_USER["name"])
+    submit_borrow_request(base_url, "OtherBorrowedPhone", "Other Borrower")
+
+    page.goto(f"{base_url}/borrow")
+
+    expect(page.get_by_role("tab", name="全部设备")).to_be_visible()
+    expect(page.locator("tbody tr", has_text="MyBorrowedPhone")).to_have_count(1)
+    expect(page.locator("tbody tr", has_text="OtherBorrowedPhone")).to_have_count(1)
+
+    my_tab = page.get_by_role("tab", name=re.compile(r"我借用的 \(1\)"))
+    expect(my_tab).to_be_visible()
+    my_tab.click()
+
+    expect(page.locator("tbody tr", has_text="MyBorrowedPhone")).to_have_count(1)
+    expect(page.locator("tbody tr", has_text="OtherBorrowedPhone")).to_have_count(0)
 
 
 def test_borrow_sort_resets_page(page, base_url):

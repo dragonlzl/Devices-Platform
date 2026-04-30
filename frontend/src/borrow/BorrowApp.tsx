@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AutoComplete,
   Button,
@@ -11,6 +11,7 @@ import {
   Space,
   Spin,
   Table,
+  Tabs,
   Tag,
   Typography,
   message,
@@ -39,6 +40,11 @@ import {
 } from '../shared/utils';
 
 type SortOrder = 'ascend' | 'descend';
+type DeviceScope = 'all' | 'mine';
+
+function normalizeText(value: unknown): string {
+  return String(value || '').trim();
+}
 
 function normalizeSorter(
   sorter: unknown
@@ -261,6 +267,7 @@ export default function BorrowApp(props: { currentUser: PortalUser }) {
   const [accurateModelName, setAccurateModelName] = useState('未配置');
   const [assignmentsReady, setAssignmentsReady] = useState(false);
   const [devicePage, setDevicePage] = useState(1);
+  const [deviceScope, setDeviceScope] = useState<DeviceScope>('all');
   const [blockedBorrowTipDeviceId, setBlockedBorrowTipDeviceId] = useState<number | null>(null);
   const blockedBorrowTipTimerRef = useRef<number | null>(null);
   const [aiMode, setAiMode] = useState<'fast' | 'accurate' | null>(() => {
@@ -293,6 +300,21 @@ export default function BorrowApp(props: { currentUser: PortalUser }) {
     const value = extractPerformance(notes);
     return performanceOrder[value] ?? 99;
   };
+  const currentUserId = normalizeText(props.currentUser.user_id);
+  const currentUserOpenId = normalizeText(props.currentUser.open_id);
+  const currentUserName = normalizeText(getUserDisplayName(props.currentUser));
+  const currentUserNameFallback = currentUserName && currentUserName !== '已登录用户' ? currentUserName : '';
+  const isBorrowedByCurrentUser = useCallback(
+    (device: Device) => {
+      const borrowerUserId = normalizeText(device.borrower_user_id);
+      const borrowerOpenId = normalizeText(device.borrower_open_id);
+      const borrowerName = normalizeText(device.borrower_name);
+      if (currentUserId && borrowerUserId && borrowerUserId === currentUserId) return true;
+      if (currentUserOpenId && borrowerOpenId && borrowerOpenId === currentUserOpenId) return true;
+      return Boolean(currentUserNameFallback && borrowerName === currentUserNameFallback);
+    },
+    [currentUserId, currentUserOpenId, currentUserNameFallback]
+  );
   const filterBorrowVisibleDevices = (items: Device[]) =>
     items.filter((item) => item.status !== '损坏');
 
@@ -649,9 +671,14 @@ export default function BorrowApp(props: { currentUser: PortalUser }) {
     },
   ];
 
+  const scopedDevices = useMemo(() => {
+    if (deviceScope === 'all') return devices;
+    return devices.filter(isBorrowedByCurrentUser);
+  }, [devices, deviceScope, isBorrowedByCurrentUser]);
+
   const sortedDevices = useMemo(() => {
-    if (!sortState) return devices;
-    const sorted = [...devices];
+    if (!sortState) return scopedDevices;
+    const sorted = [...scopedDevices];
     const { key, order } = sortState;
     const isDesc = order === 'descend';
     if (key === 'performance') {
@@ -694,11 +721,11 @@ export default function BorrowApp(props: { currentUser: PortalUser }) {
       sorted.reverse();
     }
     return sorted;
-  }, [devices, sortState]);
+  }, [scopedDevices, sortState]);
   const searchOptions = useMemo(() => {
     const keyword = query.trim().toLowerCase();
     const values = new Set<string>();
-    devices.forEach((device) => {
+    scopedDevices.forEach((device) => {
       if (device.model) values.add(device.model);
       if (device.vendor_name) values.add(device.vendor_name);
       if (device.system_name) values.add(device.system_name);
@@ -708,7 +735,11 @@ export default function BorrowApp(props: { currentUser: PortalUser }) {
       .filter((item) => !keyword || item.toLowerCase().includes(keyword))
       .slice(0, 20)
       .map((value) => ({ value }));
-  }, [devices, query]);
+  }, [scopedDevices, query]);
+  const mineDeviceCount = useMemo(
+    () => devices.filter(isBorrowedByCurrentUser).length,
+    [devices, isBorrowedByCurrentUser]
+  );
   const canSelectFast = Boolean(fastModelId);
   const canSelectAccurate = Boolean(accurateModelId);
   const selectedModelName =
@@ -752,6 +783,18 @@ export default function BorrowApp(props: { currentUser: PortalUser }) {
       <Layout.Content className="app-content">
         <div className="page">
           <section className="table-card">
+            <Tabs
+              className="borrow-device-tabs"
+              activeKey={deviceScope}
+              onChange={(key) => {
+                setDeviceScope(key as DeviceScope);
+                setDevicePage(1);
+              }}
+              items={[
+                { key: 'all', label: '全部设备' },
+                { key: 'mine', label: `我借用的 (${mineDeviceCount})` },
+              ]}
+            />
             <div className="table-header">
               <div className="table-actions">
                 <AutoComplete
