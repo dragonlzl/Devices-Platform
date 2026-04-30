@@ -1,4 +1,3 @@
-import re
 from datetime import datetime, timedelta
 
 import httpx
@@ -179,7 +178,7 @@ def test_borrow_flow(page, base_url):
     row = page.locator("tr", has_text="BorrowPhone").first
     expect(row).to_be_visible()
 
-    row.get_by_role("button", name="可借").click()
+    row.get_by_role("button", name="点击借用").click()
     page.get_by_label("借用人名字").fill("Tester")
     page.get_by_label("预计归还时间").click()
     expect(page.get_by_text("今天")).to_be_visible()
@@ -191,7 +190,7 @@ def test_borrow_flow(page, base_url):
 
     notice = page.locator(".ant-message-notice").first
     expect(notice).to_contain_text("已通知管理员")
-    expect(page.locator("tr", has_text="BorrowPhone")).to_contain_text("待借出")
+    expect(page.locator("tr", has_text="BorrowPhone")).to_contain_text("待管理员确认")
 
     row.get_by_role("button", name="换借用人").click()
     page.get_by_label("借用人名字").fill("Tester-2")
@@ -213,7 +212,7 @@ def test_unregistered_status_blocks_borrow_action(page, base_url):
     row = page.locator("tr", has_text="UnregisteredPhone").first
     expect(row).to_be_visible()
 
-    row.get_by_role("button", name="可借").click()
+    row.get_by_role("button", name="点击借用").click()
     tip = page.locator(".ant-popover-inner-content", has_text=UNREGISTERED_BORROW_TIP)
     expect(tip).to_be_visible()
     page.wait_for_timeout(5200)
@@ -223,7 +222,7 @@ def test_unregistered_status_blocks_borrow_action(page, base_url):
     page.get_by_role("button", name="清除").click()
     row = page.locator("tr", has_text="UnregisteredPhone").first
     expect(row).to_contain_text("正常")
-    row.get_by_role("button", name="可借").click()
+    row.get_by_role("button", name="点击借用").click()
     expect(page.get_by_label("借用人名字")).to_be_visible()
 
 
@@ -249,13 +248,14 @@ def test_borrow_page_filters_my_devices_tab(page, base_url):
 
     page.goto(f"{base_url}/borrow")
 
-    expect(page.get_by_role("tab", name="全部设备")).to_be_visible()
+    expect(page.get_by_role("menuitem", name="全部设备")).to_be_visible()
     expect(page.locator("tbody tr", has_text="MyBorrowedPhone")).to_have_count(1)
     expect(page.locator("tbody tr", has_text="OtherBorrowedPhone")).to_have_count(1)
 
-    my_tab = page.get_by_role("tab", name=re.compile(r"我借用的 \(1\)"))
-    expect(my_tab).to_be_visible()
-    my_tab.click()
+    my_menu_item = page.locator(".ant-menu-item", has_text="我借用的")
+    expect(my_menu_item).to_be_visible()
+    expect(my_menu_item).to_contain_text("1")
+    my_menu_item.click()
 
     expect(page.locator("tbody tr", has_text="MyBorrowedPhone")).to_have_count(1)
     expect(page.locator("tbody tr", has_text="OtherBorrowedPhone")).to_have_count(0)

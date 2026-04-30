@@ -1910,8 +1910,8 @@ export default function AdminApp(props: { currentUser: PortalUser }) {
             </div>
           </div>
         </Layout.Header>
-        <Layout>
-          <Layout.Sider className="app-sider" width={220} theme="light">
+        <div className="app-body-with-sider">
+          <aside className="app-sider">
             <Menu
               mode="inline"
               theme="light"
@@ -1935,8 +1935,8 @@ export default function AdminApp(props: { currentUser: PortalUser }) {
             <div className="sider-current-user">
               <PersonDisplay person={props.currentUser} size="medium" showJobTitle />
             </div>
-          </Layout.Sider>
-          <Layout.Content className="app-content app-content-with-sider">
+          </aside>
+          <main className="app-content app-content-with-sider">
             <div className="page page-with-sider">
               {activeMenu === 'devices' ? (
                 <section className="table-card">
@@ -2065,7 +2065,10 @@ export default function AdminApp(props: { currentUser: PortalUser }) {
                     size="small"
                     className="full-table full-table-compact full-table-auto"
                     sortDirections={['ascend', 'descend']}
-                    sticky={{ offsetHeader: 120 }}
+                    sticky={{
+                      offsetHeader: 0,
+                      getContainer: () => document.querySelector('.app-content-with-sider') as HTMLElement,
+                    }}
                     loading={loading}
                     onChange={(pagination, __, sorter, extra) => {
                       if (extra?.action === 'paginate') {
@@ -2123,7 +2126,10 @@ export default function AdminApp(props: { currentUser: PortalUser }) {
                     tableLayout="fixed"
                     size="small"
                     className="full-table full-table-compact"
-                    sticky={{ offsetHeader: 120 }}
+                    sticky={{
+                      offsetHeader: 0,
+                      getContainer: () => document.querySelector('.app-content-with-sider') as HTMLElement,
+                    }}
                     loading={pendingLoading}
                   />
                 </section>
@@ -2166,14 +2172,17 @@ export default function AdminApp(props: { currentUser: PortalUser }) {
                     tableLayout="fixed"
                     size="small"
                     className="full-table full-table-compact"
-                    sticky={{ offsetHeader: 120 }}
+                    sticky={{
+                      offsetHeader: 0,
+                      getContainer: () => document.querySelector('.app-content-with-sider') as HTMLElement,
+                    }}
                     loading={recordsLoading}
                   />
                 </section>
               ) : null}
             </div>
-          </Layout.Content>
-        </Layout>
+          </main>
+        </div>
       </Layout>
 
       <DeviceFormDrawer

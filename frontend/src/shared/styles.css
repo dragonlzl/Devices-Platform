@@ -11,6 +11,7 @@
   --line: #d7dee6;
   --card: #ffffff;
   --header-offset: 120px;
+  --sider-width: 220px;
 }
 
 * {
@@ -72,12 +73,24 @@ body {
   padding-top: var(--header-offset);
 }
 
+.app-body-with-sider {
+  display: block;
+  min-height: 100vh;
+  background: transparent;
+}
+
 .app-sider {
   background: rgba(227, 236, 243, 0.95);
   border-right: 1px solid var(--line);
   position: fixed;
   top: var(--header-offset);
   left: 0;
+  display: flex;
+  flex-direction: column;
+  width: var(--sider-width) !important;
+  max-width: var(--sider-width) !important;
+  min-width: var(--sider-width) !important;
+  flex: 0 0 var(--sider-width) !important;
   height: calc(100vh - var(--header-offset));
   overflow-y: auto;
   z-index: 45;
@@ -118,9 +131,18 @@ body {
 }
 
 .app-content-with-sider {
+  position: fixed;
+  top: var(--header-offset);
+  right: 0;
+  bottom: 0;
+  left: var(--sider-width);
+  z-index: 1;
+  overflow: auto;
   min-width: 0;
-  width: 100%;
+  width: auto;
   margin-left: 0;
+  padding-top: 0;
+  flex: none;
 }
 
 .page {
@@ -134,7 +156,7 @@ body {
   width: 100%;
   max-width: none;
   margin: 0;
-  padding: 24px 24px 40px 16px;
+  padding: 24px 24px 40px;
 }
 
 .hero {
@@ -330,6 +352,10 @@ body {
   overflow: hidden;
 }
 
+.loan-status-single {
+  border: 0;
+}
+
 .loan-status-segment {
   padding: 2px 8px;
   font-size: 12px;
@@ -339,6 +365,13 @@ body {
   border: 0;
   border-right: 1px solid var(--line);
   cursor: default;
+}
+
+.loan-status-segment.is-single {
+  min-width: 82px;
+  padding: 4px 10px;
+  border: 0;
+  border-radius: 6px;
 }
 
 .loan-status-segment:last-child {
@@ -354,7 +387,7 @@ body {
 }
 
 .loan-status-segment.is-active.is-available {
-  background: #2f8a57;
+  background: #13b957;
   color: #ffffff;
   font-weight: 600;
 }
@@ -461,20 +494,6 @@ body {
   justify-content: space-between;
   background: linear-gradient(90deg, rgba(28, 124, 90, 0.08), rgba(176, 74, 44, 0.06));
   border-bottom: 1px solid var(--line);
-}
-
-.borrow-device-tabs {
-  padding: 0 20px;
-  background: #ffffff;
-  border-bottom: 1px solid var(--line);
-}
-
-.borrow-device-tabs .ant-tabs-nav {
-  margin: 0;
-}
-
-.borrow-device-tabs .ant-tabs-tab {
-  padding: 14px 0;
 }
 
 .ai-reason {

@@ -1,17 +1,18 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AutoComplete,
+  Badge,
   Button,
   DatePicker,
   Drawer,
   Form,
   Input,
   Layout,
+  Menu,
   Popover,
   Space,
   Spin,
   Table,
-  Tabs,
   Tag,
   Typography,
   message,
@@ -24,6 +25,8 @@ import {
   TabletOutlined,
   ControlOutlined,
   CheckOutlined,
+  AppstoreOutlined,
+  UserOutlined,
 } from '@ant-design/icons';
 import dayjs, { Dayjs } from 'dayjs';
 import { apiRequest } from '../shared/api';
@@ -618,10 +621,9 @@ export default function BorrowApp(props: { currentUser: PortalUser }) {
         const borrowButton = (
           <button
             type="button"
-            className={`loan-status-segment ${isAvailable ? 'is-active is-available' : ''} ${
+            className={`loan-status-segment is-single is-active is-available ${
               canBorrow ? 'is-clickable' : ''
             } ${showUnregisteredBorrowTip ? 'is-blocked' : ''}`}
-            disabled={!isAvailable && !showUnregisteredBorrowTip}
             onClick={() => {
               if (canBorrow) {
                 setBorrowDevice(record);
@@ -632,12 +634,12 @@ export default function BorrowApp(props: { currentUser: PortalUser }) {
               }
             }}
           >
-            可借
+            点击借用
           </button>
         );
-        return (
-          <div className="loan-status-group" role="group" aria-label="借用状态">
-            {showUnregisteredBorrowTip ? (
+        const statusControl = (() => {
+          if (isAvailable) {
+            return showUnregisteredBorrowTip ? (
               <Popover
                 trigger="click"
                 content={unregisteredBorrowTipText}
@@ -652,19 +654,27 @@ export default function BorrowApp(props: { currentUser: PortalUser }) {
               </Popover>
             ) : (
               borrowButton
-            )}
-            <span
-              className={`loan-status-segment ${isPending ? 'is-active is-pending' : ''}`}
-              aria-disabled="true"
-            >
-              待借
-            </span>
-            <span
-              className={`loan-status-segment ${isBorrowed ? 'is-active is-borrowed' : ''}`}
-              aria-disabled="true"
-            >
-              已借
-            </span>
+            );
+          }
+          if (isPending) {
+            return (
+              <span className="loan-status-segment is-single is-active is-pending">
+                待管理员确认
+              </span>
+            );
+          }
+          if (isBorrowed) {
+            return (
+              <span className="loan-status-segment is-single is-active is-borrowed">
+                已被借用
+              </span>
+            );
+          }
+          return <span className="loan-status-segment is-single">{record.loan_status || '-'}</span>;
+        })();
+        return (
+          <div className="loan-status-group loan-status-single" role="group" aria-label="借用状态">
+            {statusControl}
           </div>
         );
       },
@@ -777,81 +787,96 @@ export default function BorrowApp(props: { currentUser: PortalUser }) {
             </Typography.Title>
             <Typography.Text type="secondary">快速查找与借用设备，支持智能搜索与延期。</Typography.Text>
           </Space>
-          <PersonDisplay person={props.currentUser} size="medium" showJobTitle className="header-user" />
         </div>
       </Layout.Header>
-      <Layout.Content className="app-content">
-        <div className="page">
-          <section className="table-card">
-            <Tabs
-              className="borrow-device-tabs"
-              activeKey={deviceScope}
-              onChange={(key) => {
-                setDeviceScope(key as DeviceScope);
-                setDevicePage(1);
-              }}
-              items={[
-                { key: 'all', label: '全部设备' },
-                { key: 'mine', label: `我借用的 (${mineDeviceCount})` },
-              ]}
-            />
-            <div className="table-header">
-              <div className="table-actions">
-                <AutoComplete
-                  value={query}
-                  options={searchOptions}
-                  onSearch={(value) => setQuery(value)}
-                  onSelect={(value) => setQuery(value)}
-                  onChange={(value) => setQuery(value)}
-                  style={{ width: 280 }}
-                  allowClear
-                >
-                  <Input placeholder="输入型号/系统/厂商等关键词" />
-                </AutoComplete>
-                <Button
-                  icon={<SearchOutlined />}
-                  onClick={() => {
-                    setDevicePage(1);
-                    loadDevices(query.trim());
-                  }}
-                  disabled={aiLoading}
-                >
-                  普通搜索
-                </Button>
-                <Button.Group className="ai-mode-group">
-                  <Button
-                    icon={<ThunderboltOutlined />}
-                    onClick={async () => {
-                      const value = query.trim();
-                      if (!value) {
-                        message.error('请输入搜索内容');
-                        return;
-                      }
-                      setAiLoading(true);
-                      try {
-                        const data = await apiRequest<{ items: Device[]; ai_reason?: string }>('/api/llm/search', {
-                          method: 'POST',
-                          body: { query: value, mode: aiMode || undefined },
-                        });
-                        const visibleItems = filterBorrowVisibleDevices(data.items || []);
-                        setDevices(visibleItems);
-                        setAiReason(data.ai_reason || '');
-                        setDevicePage(1);
-                        if (!visibleItems.length) {
-                          message.error('未找到匹配设备');
-                        }
-                      } catch (err) {
-                        setAiReason('');
-                        message.error((err as Error).message || 'AI 模型服务暂不可用');
-                      } finally {
-                        setAiLoading(false);
-                      }
-                    }}
-                    loading={aiLoading}
-                    className="ai-mode-main"
+      <div className="app-body-with-sider">
+        <aside className="app-sider">
+          <Menu
+            mode="inline"
+            theme="light"
+            selectedKeys={[deviceScope]}
+            onClick={(info) => {
+              setDeviceScope(info.key as DeviceScope);
+              setDevicePage(1);
+            }}
+            items={[
+              { key: 'all', icon: <AppstoreOutlined />, label: '全部设备' },
+              {
+                key: 'mine',
+                icon: <UserOutlined />,
+                label: (
+                  <span className="menu-item-label">
+                    <span>我借用的</span>
+                    <Badge count={mineDeviceCount} size="small" showZero />
+                  </span>
+                ),
+              },
+            ]}
+          />
+          <div className="sider-current-user">
+            <PersonDisplay person={props.currentUser} size="medium" showJobTitle />
+          </div>
+        </aside>
+        <main className="app-content app-content-with-sider">
+          <div className="page page-with-sider">
+            <section className="table-card">
+              <div className="table-header">
+                <div className="table-actions">
+                  <AutoComplete
+                    value={query}
+                    options={searchOptions}
+                    onSearch={(value) => setQuery(value)}
+                    onSelect={(value) => setQuery(value)}
+                    onChange={(value) => setQuery(value)}
+                    style={{ width: 280 }}
+                    allowClear
                   >
-                    {smartSearchLabel}
+                    <Input placeholder="输入型号/系统/厂商等关键词" />
+                  </AutoComplete>
+                  <Button
+                    icon={<SearchOutlined />}
+                    onClick={() => {
+                      setDevicePage(1);
+                      loadDevices(query.trim());
+                    }}
+                    disabled={aiLoading}
+                  >
+                    普通搜索
                   </Button>
+                  <Button.Group className="ai-mode-group">
+                    <Button
+                      icon={<ThunderboltOutlined />}
+                      onClick={async () => {
+                        const value = query.trim();
+                        if (!value) {
+                          message.error('请输入搜索内容');
+                          return;
+                        }
+                        setAiLoading(true);
+                        try {
+                          const data = await apiRequest<{ items: Device[]; ai_reason?: string }>('/api/llm/search', {
+                            method: 'POST',
+                            body: { query: value, mode: aiMode || undefined },
+                          });
+                          const visibleItems = filterBorrowVisibleDevices(data.items || []);
+                          setDevices(visibleItems);
+                          setAiReason(data.ai_reason || '');
+                          setDevicePage(1);
+                          if (!visibleItems.length) {
+                            message.error('未找到匹配设备');
+                          }
+                        } catch (err) {
+                          setAiReason('');
+                          message.error((err as Error).message || 'AI 模型服务暂不可用');
+                        } finally {
+                          setAiLoading(false);
+                        }
+                      }}
+                      loading={aiLoading}
+                      className="ai-mode-main"
+                    >
+                      {smartSearchLabel}
+                    </Button>
                   <Button
                     type={aiMode === 'fast' ? 'primary' : 'default'}
                     onClick={() => {
@@ -919,7 +944,10 @@ export default function BorrowApp(props: { currentUser: PortalUser }) {
               size="small"
               className="full-table"
               sortDirections={['ascend', 'descend']}
-              sticky={{ offsetHeader: 120 }}
+              sticky={{
+                offsetHeader: 0,
+                getContainer: () => document.querySelector('.app-content-with-sider') as HTMLElement,
+              }}
               onChange={(pagination, __, sorter, extra) => {
                 if (extra?.action === 'paginate') {
                   setDevicePage(pagination.current || 1);
@@ -1034,8 +1062,9 @@ export default function BorrowApp(props: { currentUser: PortalUser }) {
               <Typography.Text>{detailDevice?.notes || '-'}</Typography.Text>
             </Space>
           </Drawer>
-        </div>
-      </Layout.Content>
+          </div>
+        </main>
+      </div>
     </Layout>
   );
 }
