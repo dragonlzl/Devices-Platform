@@ -307,6 +307,37 @@ def test_admin_pending_auto_refresh(page, base_url):
     expect(page.locator("tr", has_text="AutoPendingPhone").first).to_be_visible(timeout=10000)
 
 
+def test_admin_notification_settings_preview_and_edit(page, base_url):
+    with httpx.Client(base_url=base_url) as client:
+        client.put("/api/settings/feishu", json={"webhook_url": "http://webhook.test"})
+
+    page.goto(f"{base_url}/admin")
+    page.get_by_role("button", name="通知设置").click()
+    expect(page.locator(".ant-drawer-title", has_text="通知设置")).to_be_visible()
+    expect(page.get_by_text("待借申请提交")).to_be_visible()
+
+    row = page.locator("tr", has_text="借用确认成功").first
+    row.get_by_role("button", name="编辑").click()
+    title_item = page.locator(".ant-form-item", has_text="卡片标题").last
+    title_item.get_by_role("textbox").fill("借用确认已完成")
+    status_item = page.locator(".ant-form-item", has_text="状态文案").last
+    status_item.locator("textarea").fill("请到管理员处领取设备")
+    expect(page.get_by_text("预览：借用确认成功")).to_be_visible()
+    expect(page.get_by_text("借用确认已完成")).to_be_visible()
+    expect(page.get_by_text("请到管理员处领取设备")).to_be_visible()
+
+    page.get_by_role("button", name="保存").click()
+    notice = page.locator(".ant-message-notice").first
+    expect(notice).to_contain_text("保存成功")
+
+    with httpx.Client(base_url=base_url) as client:
+        items = client.get("/api/settings/notifications").json()["items"]
+    borrow_approve = next(item for item in items if item["key"] == "borrow_approve")
+    assert borrow_approve["params"]["card_title"] == "借用确认已完成"
+    assert borrow_approve["params"]["status"] == "请到管理员处领取设备"
+    assert borrow_approve["customized"] is True
+
+
 def seed_record_with_change(base_url):
     with httpx.Client(base_url=base_url) as client:
         vendors = client.get("/api/vendors").json()["items"]

@@ -557,6 +557,17 @@ body {
   gap: 12px;
 }
 
+.notification-row-selected td {
+  background: rgba(31, 111, 178, 0.08) !important;
+}
+
+.notification-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 16px;
+}
+
 @media (max-width: 900px) {
   .page {
     padding: 24px 16px 40px;

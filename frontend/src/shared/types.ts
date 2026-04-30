@@ -150,3 +150,24 @@ export interface LLMModelAssignments {
   fast_model_id: number | null;
   accurate_model_id: number | null;
 }
+
+export interface NotificationParams {
+  card_title: string;
+  status: string;
+  card_color: string;
+  status_color: string;
+}
+
+export interface NotificationSettingItem {
+  key: string;
+  label: string;
+  description: string;
+  defaults: NotificationParams;
+  params: NotificationParams;
+  customized: boolean;
+}
+
+export interface NotificationSettingsResponse {
+  items: NotificationSettingItem[];
+  color_options: string[];
+}

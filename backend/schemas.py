@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Dict, Optional
 
 
 class VendorCreate(BaseModel):
@@ -84,6 +84,17 @@ class VersionDeleteRequest(BaseModel):
 
 class SettingUpdate(BaseModel):
     webhook_url: str = Field(..., min_length=1)
+
+
+class NotificationParamUpdate(BaseModel):
+    card_title: str = Field(..., min_length=1)
+    status: str = Field(..., min_length=1)
+    card_color: str = Field(..., min_length=1)
+    status_color: str = Field(..., min_length=1)
+
+
+class NotificationSettingsUpdate(BaseModel):
+    settings: Dict[str, NotificationParamUpdate]
 
 
 class LLMModelCreate(BaseModel):

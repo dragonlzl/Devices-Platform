@@ -46,6 +46,9 @@ import {
   Device,
   LLMModel,
   LLMModelAssignments,
+  NotificationParams,
+  NotificationSettingItem,
+  NotificationSettingsResponse,
   SystemItem,
   SystemVersion,
   PortalUser,
@@ -69,6 +72,12 @@ function normalizeSorter(
 
 const STATUS_OPTIONS = ['正常', '未登记借用', '损坏', '被常驻', '报修'];
 const TYPE_OPTIONS = ['手机', '平板', '手柄'];
+const NOTIFICATION_PARAM_FIELDS: Array<keyof NotificationParams> = [
+  'card_title',
+  'status',
+  'card_color',
+  'status_color',
+];
 const getStatusRank = (value?: string | null) => (value === '正常' ? 0 : 1);
 const compareStatus = (a?: string | null, b?: string | null) => {
   const diff = getStatusRank(a) - getStatusRank(b);
@@ -770,20 +779,123 @@ function NotifyDrawer(props: {
 }) {
   const [form] = Form.useForm();
   const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [settings, setSettings] = useState<NotificationSettingItem[]>([]);
+  const [colorOptions, setColorOptions] = useState<string[]>([]);
+  const [selectedKey, setSelectedKey] = useState('');
+  const selectedSetting = useMemo(
+    () => settings.find((item) => item.key === selectedKey) || settings[0] || null,
+    [settings, selectedKey]
+  );
+  const previewParams: NotificationParams = {
+    card_title: String(Form.useWatch('card_title', form) ?? selectedSetting?.params.card_title ?? ''),
+    status: String(Form.useWatch('status', form) ?? selectedSetting?.params.status ?? ''),
+    card_color: String(Form.useWatch('card_color', form) ?? selectedSetting?.params.card_color ?? 'blue'),
+    status_color: String(Form.useWatch('status_color', form) ?? selectedSetting?.params.status_color ?? 'blue'),
+  };
 
   useEffect(() => {
     if (!props.open) return;
     setLoading(true);
-    apiRequest<{ webhook_url: string }>('/api/settings/feishu')
-      .then((data) => form.setFieldsValue({ webhook: data.webhook_url || '' }))
+    Promise.all([
+      apiRequest<{ webhook_url: string }>('/api/settings/feishu'),
+      apiRequest<NotificationSettingsResponse>('/api/settings/notifications'),
+    ])
+      .then(([feishuData, notificationData]) => {
+        const items = notificationData.items || [];
+        setSettings(items);
+        setColorOptions(notificationData.color_options || []);
+        setSelectedKey(items[0]?.key || '');
+        form.setFieldsValue({
+          webhook: feishuData.webhook_url || '',
+          ...(items[0]?.params || {}),
+        });
+      })
       .catch((err) => message.error(err.message))
       .finally(() => setLoading(false));
   }, [props.open, form]);
 
+  useEffect(() => {
+    if (!props.open || !selectedSetting) return;
+    form.setFieldsValue(selectedSetting.params);
+  }, [props.open, selectedKey, form]);
+
+  const pickNotificationParams = (values: Record<string, unknown>): NotificationParams => ({
+    card_title: String(values.card_title || '').trim(),
+    status: String(values.status || '').trim(),
+    card_color: String(values.card_color || '').trim(),
+    status_color: String(values.status_color || '').trim(),
+  });
+
+  const mergeSelectedParams = (params: NotificationParams) =>
+    settings.map((item) =>
+      item.key === selectedSetting?.key
+        ? {
+            ...item,
+            params,
+            customized: JSON.stringify(params) !== JSON.stringify(item.defaults),
+          }
+        : item
+    );
+
+  const handleValuesChange = (changed: Record<string, unknown>, values: Record<string, unknown>) => {
+    if (!selectedSetting) return;
+    const changedParam = NOTIFICATION_PARAM_FIELDS.some((field) =>
+      Object.prototype.hasOwnProperty.call(changed, field)
+    );
+    if (!changedParam) return;
+    setSettings(mergeSelectedParams(pickNotificationParams(values)));
+  };
+
+  const handleResetSelected = () => {
+    if (!selectedSetting) return;
+    form.setFieldsValue(selectedSetting.defaults);
+    setSettings(mergeSelectedParams(selectedSetting.defaults));
+  };
+
+  const handleSave = () => {
+    form
+      .validateFields()
+      .then((values) => {
+        const nextSettings = selectedSetting
+          ? mergeSelectedParams(pickNotificationParams(values))
+          : settings;
+        const notificationPayload = nextSettings.reduce<Record<string, NotificationParams>>((acc, item) => {
+          acc[item.key] = item.params;
+          return acc;
+        }, {});
+        setSaving(true);
+        return Promise.all([
+          apiRequest('/api/settings/feishu', {
+            method: 'PUT',
+            body: { webhook_url: String(values.webhook || '').trim() },
+          }),
+          apiRequest<NotificationSettingsResponse>('/api/settings/notifications', {
+            method: 'PUT',
+            body: { settings: notificationPayload },
+          }),
+        ]);
+      })
+      .then(([, notificationData]) => {
+        setSettings(notificationData.items || []);
+        setColorOptions(notificationData.color_options || []);
+        message.success('保存成功');
+      })
+      .catch((err) => {
+        if (err?.errorFields) return;
+        message.error((err as Error).message);
+      })
+      .finally(() => setSaving(false));
+  };
+
+  const selectOptions = (colorOptions.length ? colorOptions : ['blue', 'green', 'yellow', 'orange', 'red', 'grey']).map(
+    (item) => ({ value: item, label: item })
+  );
+
   return (
-    <Drawer open={props.open} onClose={props.onCancel} width={520} title="通知设置">
+    <Drawer open={props.open} onClose={props.onCancel} width={860} title="通知设置">
       <Spin spinning={loading}>
-        <Form layout="vertical" form={form}>
+        <Form layout="vertical" form={form} onValuesChange={handleValuesChange}>
           <Form.Item
             label="飞书 Webhook 地址"
             name="webhook"
@@ -791,26 +903,121 @@ function NotifyDrawer(props: {
           >
             <Input placeholder="https://open.feishu.cn/xxx" />
           </Form.Item>
+          <Typography.Title level={5}>通知参数</Typography.Title>
+          <Table
+            rowKey="key"
+            size="small"
+            pagination={false}
+            dataSource={settings}
+            rowClassName={(record) => (record.key === selectedSetting?.key ? 'notification-row-selected' : '')}
+            columns={[
+              {
+                title: '触发点',
+                dataIndex: 'label',
+                render: (_: unknown, record: NotificationSettingItem) => (
+                  <Space direction="vertical" size={2}>
+                    <Typography.Text strong>{record.label}</Typography.Text>
+                    <Typography.Text type="secondary" className="section-note">
+                      {record.description}
+                    </Typography.Text>
+                  </Space>
+                ),
+              },
+              {
+                title: '标题',
+                dataIndex: ['params', 'card_title'],
+                render: (value: string) => <Typography.Text>{value}</Typography.Text>,
+              },
+              {
+                title: '状态文案',
+                dataIndex: ['params', 'status'],
+                render: (value: string) => <Typography.Text>{value}</Typography.Text>,
+              },
+              {
+                title: '颜色',
+                render: (_: unknown, record: NotificationSettingItem) => (
+                  <Space size={4}>
+                    <Tag color={record.params.card_color}>卡片 {record.params.card_color}</Tag>
+                    <Tag color={record.params.status_color}>状态 {record.params.status_color}</Tag>
+                  </Space>
+                ),
+              },
+              {
+                title: '操作',
+                width: 92,
+                render: (_: unknown, record: NotificationSettingItem) => (
+                  <Button
+                    size="small"
+                    type={record.key === selectedSetting?.key ? 'primary' : 'default'}
+                    icon={<EditOutlined />}
+                    onClick={() => setSelectedKey(record.key)}
+                  >
+                    编辑
+                  </Button>
+                ),
+              },
+            ]}
+          />
+          {selectedSetting && (
+            <div className="notification-editor">
+              <Card size="small" title={`预览：${selectedSetting.label}`}>
+                <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                  <Space wrap>
+                    <Tag color={previewParams.card_color}>卡片 {previewParams.card_color}</Tag>
+                    <Tag color={previewParams.status_color}>状态 {previewParams.status_color}</Tag>
+                    {selectedSetting.customized && <Tag color="gold">已自定义</Tag>}
+                  </Space>
+                  <Typography.Title level={5} style={{ margin: 0 }}>
+                    {previewParams.card_title || '-'}
+                  </Typography.Title>
+                  <Typography.Text>{previewParams.status || '-'}</Typography.Text>
+                  <Typography.Text type="secondary" className="section-note">
+                    变量支持 {'{old_borrower}'} 与 {'{new_borrower}'}，仅借用人变更类通知会替换。
+                  </Typography.Text>
+                </Space>
+              </Card>
+              <Form.Item
+                label="卡片标题"
+                name="card_title"
+                rules={[{ required: true, message: '卡片标题不能为空' }]}
+              >
+                <Input placeholder="输入卡片标题" />
+              </Form.Item>
+              <Form.Item
+                label="状态文案"
+                name="status"
+                rules={[{ required: true, message: '状态文案不能为空' }]}
+              >
+                <Input.TextArea rows={2} placeholder="输入状态文案" />
+              </Form.Item>
+              <Space size={12} style={{ width: '100%' }} align="start">
+                <Form.Item
+                  label="卡片颜色"
+                  name="card_color"
+                  rules={[{ required: true, message: '卡片颜色不能为空' }]}
+                  style={{ flex: 1 }}
+                >
+                  <Select options={selectOptions} />
+                </Form.Item>
+                <Form.Item
+                  label="状态颜色"
+                  name="status_color"
+                  rules={[{ required: true, message: '状态颜色不能为空' }]}
+                  style={{ flex: 1 }}
+                >
+                  <Select options={selectOptions} />
+                </Form.Item>
+              </Space>
+              <Button icon={<ReloadOutlined />} onClick={handleResetSelected}>
+                恢复当前触发点默认值
+              </Button>
+            </div>
+          )}
         </Form>
       </Spin>
       <div className="drawer-footer">
         <Button onClick={props.onCancel}>取消</Button>
-        <Button
-          type="primary"
-          onClick={() => {
-            form
-              .validateFields()
-              .then((values) =>
-                apiRequest('/api/settings/feishu', {
-                  method: 'PUT',
-                  body: { webhook_url: String(values.webhook || '').trim() },
-                })
-                  .then(() => message.success('保存成功'))
-                  .catch((err) => message.error(err.message))
-              )
-              .catch(() => null);
-          }}
-        >
+        <Button type="primary" loading={saving} onClick={handleSave}>
           保存
         </Button>
       </div>

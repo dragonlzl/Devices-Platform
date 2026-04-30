@@ -28,6 +28,7 @@ from .schemas import (
     LLMModelAssignRequest,
     LLMModelUpdate,
     LLMTestRequest,
+    NotificationSettingsUpdate,
     SettingUpdate,
     SystemCreate,
     SystemDeleteRequest,
@@ -70,6 +71,133 @@ DEFAULT_PORTAL_NOTIFICATION_SERVICE_ID = "device-borrow-service"
 PORTAL_NOTIFICATION_SERVICE_ID_ENV = "PORTAL_NOTIFICATION_SERVICE_ID"
 PORTAL_NOTIFICATION_SERVICE_TOKEN_ENV = "PORTAL_NOTIFICATION_SERVICE_TOKEN"
 logger = logging.getLogger(__name__)
+
+NOTIFICATION_SETTINGS_KEY = "portal_notification_params"
+NOTIFICATION_COLOR_OPTIONS = ("blue", "green", "yellow", "orange", "red", "grey")
+NOTIFICATION_PARAM_FIELDS = ("card_title", "status", "card_color", "status_color")
+NOTIFICATION_COLOR_FIELDS = {"card_color", "status_color"}
+NOTIFICATION_TRIGGER_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "borrow_submit": {
+        "label": "待借申请提交",
+        "description": "借用页提交待借申请后通知申请人。",
+        "params": {
+            "card_title": "借用申请已提交",
+            "status": "待管理员确认设备状态",
+            "card_color": "blue",
+            "status_color": "yellow",
+        },
+    },
+    "borrow_approve": {
+        "label": "借用确认成功",
+        "description": "管理员确认借出后通知借用人。",
+        "params": {
+            "card_title": "借用成功",
+            "status": "借用成功，请联系 @林镇龙 领取设备",
+            "card_color": "green",
+            "status_color": "green",
+        },
+    },
+    "borrow_cancel": {
+        "label": "借用申请取消",
+        "description": "管理员取消待借申请后通知申请人。",
+        "params": {
+            "card_title": "借用失败",
+            "status": "借用失败，目标设备状态异常，请选另一台设备",
+            "card_color": "red",
+            "status_color": "red",
+        },
+    },
+    "extend": {
+        "label": "延期成功",
+        "description": "借用人延期归还时间后通知借用人。",
+        "params": {
+            "card_title": "归还时间延长成功",
+            "status": "归还时间延长成功",
+            "card_color": "green",
+            "status_color": "green",
+        },
+    },
+    "return": {
+        "label": "归还成功",
+        "description": "管理员归还设备后通知原借用人。",
+        "params": {
+            "card_title": "归还成功",
+            "status": "归还成功",
+            "card_color": "green",
+            "status_color": "green",
+        },
+    },
+    "overdue": {
+        "label": "逾期提醒",
+        "description": "后台检测到设备逾期后通知借用人。",
+        "params": {
+            "card_title": "设备借用逾期",
+            "status": "归还逾期，请及时归还，如需继续使用，请到平台点击延期",
+            "card_color": "orange",
+            "status_color": "orange",
+        },
+    },
+    "change_borrower_submit_old": {
+        "label": "变更申请-原借用人",
+        "description": "提交借用人变更申请后通知原借用人。",
+        "params": {
+            "card_title": "借用人变更申请",
+            "status": "待管理员确认，借用人将变为{new_borrower}",
+            "card_color": "blue",
+            "status_color": "yellow",
+        },
+    },
+    "change_borrower_submit_new": {
+        "label": "变更申请-新借用人",
+        "description": "提交借用人变更申请后通知新借用人。",
+        "params": {
+            "card_title": "借用人变更申请",
+            "status": "待管理员确认，{old_borrower}将变为{new_borrower}",
+            "card_color": "blue",
+            "status_color": "yellow",
+        },
+    },
+    "change_borrower_approve_old": {
+        "label": "变更成功-原借用人",
+        "description": "管理员确认借用人变更后通知原借用人。",
+        "params": {
+            "card_title": "借用人变更成功",
+            "status": "借用人已变为{new_borrower}",
+            "card_color": "green",
+            "status_color": "green",
+        },
+    },
+    "change_borrower_approve_new": {
+        "label": "变更成功-新借用人",
+        "description": "管理员确认借用人变更后通知新借用人。",
+        "params": {
+            "card_title": "借用人变更成功",
+            "status": "借用人已变为{new_borrower}",
+            "card_color": "green",
+            "status_color": "green",
+        },
+    },
+    "change_borrower_cancel_old": {
+        "label": "变更失败-原借用人",
+        "description": "管理员取消借用人变更后通知原借用人。",
+        "params": {
+            "card_title": "借用人变更失败",
+            "status": "借用人变更失败",
+            "card_color": "red",
+            "status_color": "red",
+        },
+    },
+    "change_borrower_cancel_new": {
+        "label": "变更失败-新借用人",
+        "description": "管理员取消借用人变更后通知新借用人。",
+        "params": {
+            "card_title": "借用人变更失败",
+            "status": "借用人变更失败",
+            "card_color": "red",
+            "status_color": "red",
+        },
+    },
+}
 
 app = FastAPI()
 app.add_middleware(
@@ -179,6 +307,96 @@ def _delete_setting(conn, key: str) -> None:
 
 def _clean_text(value: Any) -> str:
     return str(value or "").strip()
+
+
+def _default_notification_params(trigger: str) -> Dict[str, str]:
+    config = NOTIFICATION_TRIGGER_DEFAULTS.get(trigger)
+    if not config:
+        raise HTTPException(status_code=400, detail="未知通知触发点")
+    return dict(config["params"])
+
+
+def _normalize_notification_params(values: Dict[str, Any]) -> Dict[str, str]:
+    cleaned: Dict[str, str] = {}
+    for field in NOTIFICATION_PARAM_FIELDS:
+        value = _clean_text(values.get(field))
+        if not value:
+            raise HTTPException(status_code=400, detail="通知参数不能为空")
+        if field in NOTIFICATION_COLOR_FIELDS and value not in NOTIFICATION_COLOR_OPTIONS:
+            raise HTTPException(status_code=400, detail="通知颜色参数无效")
+        cleaned[field] = value
+    return cleaned
+
+
+def _load_notification_param_overrides(conn) -> Dict[str, Dict[str, str]]:
+    value = _get_setting(conn, NOTIFICATION_SETTINGS_KEY)
+    if not value:
+        return {}
+    try:
+        raw = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    overrides: Dict[str, Dict[str, str]] = {}
+    for trigger, params in raw.items():
+        if trigger not in NOTIFICATION_TRIGGER_DEFAULTS or not isinstance(params, dict):
+            continue
+        try:
+            overrides[trigger] = _normalize_notification_params(params)
+        except HTTPException:
+            continue
+    return overrides
+
+
+def _notification_params_for_trigger(
+    trigger: str,
+    overrides: Dict[str, Dict[str, str]],
+    template_values: Optional[Dict[str, Any]] = None,
+) -> Dict[str, str]:
+    params = _default_notification_params(trigger)
+    params.update(overrides.get(trigger, {}))
+    if template_values:
+        params["card_title"] = _render_notification_template(params["card_title"], template_values)
+        params["status"] = _render_notification_template(params["status"], template_values)
+    return params
+
+
+def _render_notification_template(value: str, values: Dict[str, Any]) -> str:
+    def replace(match: re.Match[str]) -> str:
+        return _clean_text(values.get(match.group(1))) or "-"
+
+    return re.sub(r"\{([A-Za-z0-9_]+)\}", replace, value)
+
+
+def _notification_settings_items(overrides: Dict[str, Dict[str, str]]) -> List[Dict[str, Any]]:
+    items = []
+    for trigger, config in NOTIFICATION_TRIGGER_DEFAULTS.items():
+        params = _notification_params_for_trigger(trigger, overrides)
+        items.append(
+            {
+                "key": trigger,
+                "label": config["label"],
+                "description": config["description"],
+                "defaults": _default_notification_params(trigger),
+                "params": params,
+                "customized": params != _default_notification_params(trigger),
+            }
+        )
+    return items
+
+
+def _save_notification_settings(conn, settings: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+    overrides: Dict[str, Dict[str, str]] = {}
+    for trigger, params in settings.items():
+        if trigger not in NOTIFICATION_TRIGGER_DEFAULTS:
+            raise HTTPException(status_code=400, detail="未知通知触发点")
+        raw_params = params.model_dump() if hasattr(params, "model_dump") else params.dict()
+        normalized = _normalize_notification_params(raw_params)
+        if normalized != _default_notification_params(trigger):
+            overrides[trigger] = normalized
+    _set_setting(conn, NOTIFICATION_SETTINGS_KEY, json.dumps(overrides, ensure_ascii=False, sort_keys=True))
+    return overrides
 
 
 def _legacy_borrower_profile(name: Optional[str]) -> Dict[str, Optional[str]]:
@@ -334,6 +552,30 @@ def _build_portal_card_payload(
         "status_color": status_color,
         "card_title": card_title,
     }
+
+
+def _build_configured_portal_card_payload(
+    *,
+    trigger: str,
+    borrower: Optional[str],
+    device_name: Optional[str],
+    request_date: Optional[Union[str, datetime]],
+    return_date: Optional[Union[str, datetime]],
+    template_values: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    with db_session() as conn:
+        overrides = _load_notification_param_overrides(conn)
+    params = _notification_params_for_trigger(trigger, overrides, template_values)
+    return _build_portal_card_payload(
+        borrower=borrower,
+        device_name=device_name,
+        request_date=request_date,
+        return_date=return_date,
+        status=params["status"],
+        card_color=params["card_color"],
+        status_color=params["status_color"],
+        card_title=params["card_title"],
+    )
 
 
 async def _queue_portal_notification(
@@ -1013,15 +1255,12 @@ async def _process_overdue_notifications_once(now: Optional[datetime] = None) ->
 
     client: httpx.AsyncClient = app.state.http_client
     for item in pending:
-        payload = _build_portal_card_payload(
+        payload = _build_configured_portal_card_payload(
+            trigger="overdue",
             borrower=item["borrower_name"],
             device_name=item["device_model"],
             request_date=item["requested_at"],
             return_date=item["expected_return_at"],
-            status="归还逾期，请及时归还，如需继续使用，请到平台点击延期",
-            card_color="orange",
-            status_color="orange",
-            card_title="设备借用逾期",
         )
         try:
             await send_portal_notification(
@@ -1501,15 +1740,12 @@ async def borrow_device(device_id: int, payload: BorrowRequest, background_tasks
         background_tasks,
         context="borrow_submit",
         recipient_user_id=borrower_profile.get("user_id"),
-        payload=_build_portal_card_payload(
+        payload=_build_configured_portal_card_payload(
+            trigger="borrow_submit",
             borrower=borrower_profile["name"],
             device_name=row["model"],
             request_date=request_now,
             return_date=expected_return,
-            status="待管理员确认设备状态",
-            card_color="blue",
-            status_color="yellow",
-            card_title="借用申请已提交",
         ),
         auth=portal_auth,
     )
@@ -1552,15 +1788,12 @@ async def extend_device(device_id: int, payload: ExtendRequest, background_tasks
         background_tasks,
         context="extend",
         recipient_user_id=row["borrower_user_id"],
-        payload=_build_portal_card_payload(
+        payload=_build_configured_portal_card_payload(
+            trigger="extend",
             borrower=row["borrower_name"] or "-",
             device_name=row["model"],
             request_date=_borrow_context_request_date(borrow_context),
             return_date=expected_return,
-            status="归还时间延长成功",
-            card_color="green",
-            status_color="green",
-            card_title="归还时间延长成功",
         ),
         auth=portal_auth,
     )
@@ -1639,15 +1872,13 @@ async def change_borrower(
         background_tasks,
         context="change_borrower_submit_old",
         recipient_user_id=row["borrower_user_id"],
-        payload=_build_portal_card_payload(
+        payload=_build_configured_portal_card_payload(
+            trigger="change_borrower_submit_old",
             borrower=old_borrower,
             device_name=row["model"],
             request_date=_borrow_context_request_date(old_borrow_context),
             return_date=old_expected,
-            status=f"待管理员确认，借用人将变为{borrower_profile['name']}",
-            card_color="blue",
-            status_color="yellow",
-            card_title="借用人变更申请",
+            template_values={"old_borrower": old_borrower, "new_borrower": borrower_profile["name"]},
         ),
         auth=portal_auth,
     )
@@ -1655,15 +1886,13 @@ async def change_borrower(
         background_tasks,
         context="change_borrower_submit_new",
         recipient_user_id=borrower_profile.get("user_id"),
-        payload=_build_portal_card_payload(
+        payload=_build_configured_portal_card_payload(
+            trigger="change_borrower_submit_new",
             borrower=borrower_profile["name"],
             device_name=row["model"],
             request_date=request_now,
             return_date=expected_return,
-            status=f"待管理员确认，{old_borrower}将变为{borrower_profile['name']}",
-            card_color="blue",
-            status_color="yellow",
-            card_title="借用人变更申请",
+            template_values={"old_borrower": old_borrower, "new_borrower": borrower_profile["name"]},
         ),
         auth=portal_auth,
     )
@@ -1713,15 +1942,12 @@ async def return_device(device_id: int, background_tasks: BackgroundTasks, reque
         background_tasks,
         context="return",
         recipient_user_id=row["borrower_user_id"],
-        payload=_build_portal_card_payload(
+        payload=_build_configured_portal_card_payload(
+            trigger="return",
             borrower=row["borrower_name"] or "-",
             device_name=row["model"],
             request_date=_borrow_context_request_date(borrow_context),
             return_date=now,
-            status="归还成功",
-            card_color="green",
-            status_color="green",
-            card_title="归还成功",
         ),
         auth=portal_auth,
     )
@@ -1950,15 +2176,16 @@ async def approve_borrow_request(request_id: int, background_tasks: BackgroundTa
             background_tasks,
             context="change_borrower_approve_old",
             recipient_user_id=old_borrower_profile.get("user_id"),
-            payload=_build_portal_card_payload(
+            payload=_build_configured_portal_card_payload(
+                trigger="change_borrower_approve_old",
                 borrower=old_borrower_profile.get("name"),
                 device_name=request["device_model"],
                 request_date=_borrow_context_request_date(old_borrow_context),
                 return_date=old_borrow_context.get("expected_return_at") or old_expected,
-                status=f"借用人已变为{new_borrower_profile.get('name') or request['borrower_name']}",
-                card_color="green",
-                status_color="green",
-                card_title="借用人变更成功",
+                template_values={
+                    "old_borrower": old_borrower_profile.get("name"),
+                    "new_borrower": new_borrower_profile.get("name") or request["borrower_name"],
+                },
             ),
             auth=portal_auth,
         )
@@ -1966,15 +2193,16 @@ async def approve_borrow_request(request_id: int, background_tasks: BackgroundTa
             background_tasks,
             context="change_borrower_approve_new",
             recipient_user_id=new_borrower_profile.get("user_id"),
-            payload=_build_portal_card_payload(
+            payload=_build_configured_portal_card_payload(
+                trigger="change_borrower_approve_new",
                 borrower=new_borrower_profile.get("name"),
                 device_name=request["device_model"],
                 request_date=request["requested_at"],
                 return_date=request["expected_return_at"],
-                status=f"借用人已变为{new_borrower_profile.get('name') or request['borrower_name']}",
-                card_color="green",
-                status_color="green",
-                card_title="借用人变更成功",
+                template_values={
+                    "old_borrower": old_borrower_profile.get("name"),
+                    "new_borrower": new_borrower_profile.get("name") or request["borrower_name"],
+                },
             ),
             auth=portal_auth,
         )
@@ -1992,15 +2220,12 @@ async def approve_borrow_request(request_id: int, background_tasks: BackgroundTa
         background_tasks,
         context="borrow_approve",
         recipient_user_id=request["borrower_user_id"],
-        payload=_build_portal_card_payload(
+        payload=_build_configured_portal_card_payload(
+            trigger="borrow_approve",
             borrower=request["borrower_name"],
             device_name=request["device_model"],
             request_date=request["requested_at"],
             return_date=request["expected_return_at"],
-            status="借用成功，请联系 @林镇龙 领取设备",
-            card_color="green",
-            status_color="green",
-            card_title="借用成功",
         ),
         auth=portal_auth,
     )
@@ -2064,15 +2289,12 @@ async def cancel_borrow_request(request_id: int, background_tasks: BackgroundTas
             background_tasks,
             context="change_borrower_cancel_old",
             recipient_user_id=device_context.get("borrower_user_id"),
-            payload=_build_portal_card_payload(
+            payload=_build_configured_portal_card_payload(
+                trigger="change_borrower_cancel_old",
                 borrower=old_borrower_name,
                 device_name=request["device_model"],
                 request_date=_borrow_context_request_date(old_borrow_context),
                 return_date=device_context.get("expected_return_at"),
-                status="借用人变更失败",
-                card_color="red",
-                status_color="red",
-                card_title="借用人变更失败",
             ),
             auth=portal_auth,
         )
@@ -2080,15 +2302,12 @@ async def cancel_borrow_request(request_id: int, background_tasks: BackgroundTas
             background_tasks,
             context="change_borrower_cancel_new",
             recipient_user_id=request["borrower_user_id"],
-            payload=_build_portal_card_payload(
+            payload=_build_configured_portal_card_payload(
+                trigger="change_borrower_cancel_new",
                 borrower=new_borrower_name,
                 device_name=request["device_model"],
                 request_date=request["requested_at"],
                 return_date=request["expected_return_at"],
-                status="借用人变更失败",
-                card_color="red",
-                status_color="red",
-                card_title="借用人变更失败",
             ),
             auth=portal_auth,
         )
@@ -2097,15 +2316,12 @@ async def cancel_borrow_request(request_id: int, background_tasks: BackgroundTas
             background_tasks,
             context="borrow_cancel",
             recipient_user_id=request["borrower_user_id"],
-            payload=_build_portal_card_payload(
+            payload=_build_configured_portal_card_payload(
+                trigger="borrow_cancel",
                 borrower=request["borrower_name"],
                 device_name=request["device_model"],
                 request_date=request["requested_at"],
                 return_date=request["expected_return_at"],
-                status="借用失败，目标设备状态异常，请选另一台设备",
-                card_color="red",
-                status_color="red",
-                card_title="借用失败",
             ),
             auth=portal_auth,
         )
@@ -2194,6 +2410,24 @@ async def update_feishu_setting(payload: SettingUpdate):
     with db_session() as conn:
         _set_setting(conn, "feishu_webhook", payload.webhook_url.strip())
     return {"message": "保存成功"}
+
+
+@app.get("/api/settings/notifications")
+async def get_notification_settings():
+    with db_session() as conn:
+        overrides = _load_notification_param_overrides(conn)
+    return {"items": _notification_settings_items(overrides), "color_options": list(NOTIFICATION_COLOR_OPTIONS)}
+
+
+@app.put("/api/settings/notifications")
+async def update_notification_settings(payload: NotificationSettingsUpdate):
+    with db_session() as conn:
+        overrides = _save_notification_settings(conn, payload.settings)
+    return {
+        "message": "保存成功",
+        "items": _notification_settings_items(overrides),
+        "color_options": list(NOTIFICATION_COLOR_OPTIONS),
+    }
 
 
 @app.get("/api/notifications/overdue-status")
