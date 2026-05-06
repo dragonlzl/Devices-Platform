@@ -352,7 +352,7 @@ def test_cancel_and_change_notifications_use_expected_recipients(client, monkeyp
     assert {item["payload"]["card_title"] for item in calls} == {"借用人变更成功"}
 
 
-def _seed_overdue_device():
+def _seed_overdue_device(status="正常"):
     now = now_iso()
     overdue_at = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
     with db_session() as conn:
@@ -371,10 +371,10 @@ def _seed_overdue_device():
                 model, status, type, vendor_id, system_id, system_version_id,
                 loan_status, borrower_name, borrower_user_id, borrowed_at, expected_return_at,
                 overdue_notified, created_at, updated_at
-            ) VALUES ('OverduePhone', '正常', '手机', ?, ?, ?, 'borrowed',
+            ) VALUES ('OverduePhone', ?, '手机', ?, ?, ?, 'borrowed',
                       'Alice', 'ou_alice', ?, ?, 0, ?, ?)
             """,
-            (vendor_id, system_id, version_id, now, overdue_at, now, now),
+            (status, vendor_id, system_id, version_id, now, overdue_at, now, now),
         )
         device_id = conn.execute("SELECT id FROM devices").fetchone()["id"]
         conn.execute(
@@ -531,6 +531,57 @@ def test_overdue_notification_handles_invalid_service_token_without_leaking_secr
     assert pending["last_error_status"] == 401
     assert "invalid-service-token" not in pending["last_error_message"]
     assert pending["status"] == "pending"
+
+
+def test_overdue_notification_does_not_queue_resident_device(client, monkeypatch):
+    calls = []
+    _seed_overdue_device(status="被常驻")
+    os.environ["PORTAL_NOTIFICATION_SERVICE_TOKEN"] = "service-token"
+
+    async def fake_send(*args, **kwargs):
+        calls.append(kwargs)
+        return {"success": True, "code": "OK"}
+
+    monkeypatch.setattr(main, "send_portal_notification", fake_send)
+
+    asyncio.run(main._process_overdue_notifications_once(datetime.now(timezone.utc)))
+
+    with db_session() as conn:
+        notification_count = conn.execute("SELECT COUNT(1) AS count FROM overdue_notifications").fetchone()["count"]
+        device = conn.execute("SELECT overdue_notified FROM devices").fetchone()
+    assert calls == []
+    assert notification_count == 0
+    assert device["overdue_notified"] == 0
+
+
+def test_overdue_notification_skips_if_device_becomes_resident_before_send(client, monkeypatch):
+    calls = []
+    device_id, _ = _seed_overdue_device()
+    checked_at = datetime.now(timezone.utc)
+    os.environ["PORTAL_NOTIFICATION_SERVICE_TOKEN"] = "service-token"
+
+    async def fake_send(*args, **kwargs):
+        calls.append(kwargs)
+        return {"success": True, "code": "OK"}
+
+    monkeypatch.setattr(main, "send_portal_notification", fake_send)
+
+    with db_session() as conn:
+        main._upsert_pending_overdue_notifications(conn, checked_at)
+        conn.execute(
+            "UPDATE devices SET status = ?, updated_at = ? WHERE id = ?",
+            ("被常驻", now_iso(), device_id),
+        )
+
+    asyncio.run(main._process_overdue_notifications_once(checked_at))
+
+    with db_session() as conn:
+        skipped = conn.execute("SELECT status, last_error_code FROM overdue_notifications").fetchone()
+        device = conn.execute("SELECT overdue_notified FROM devices WHERE id = ?", (device_id,)).fetchone()
+    assert calls == []
+    assert skipped["status"] == "skipped"
+    assert skipped["last_error_code"] == "OVERDUE_NOTIFICATION_STALE"
+    assert device["overdue_notified"] == 0
 
 
 def test_overdue_notification_skips_stale_snapshot_after_return_time_changes(client, monkeypatch):

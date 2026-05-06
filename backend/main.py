@@ -70,6 +70,7 @@ PORTAL_JWT_VERIFY_URL = os.environ.get(
 DEFAULT_PORTAL_NOTIFICATION_SERVICE_ID = "device-borrow-service"
 PORTAL_NOTIFICATION_SERVICE_ID_ENV = "PORTAL_NOTIFICATION_SERVICE_ID"
 PORTAL_NOTIFICATION_SERVICE_TOKEN_ENV = "PORTAL_NOTIFICATION_SERVICE_TOKEN"
+RESIDENT_DEVICE_STATUS = "被常驻"
 logger = logging.getLogger(__name__)
 
 NOTIFICATION_SETTINGS_KEY = "portal_notification_params"
@@ -990,7 +991,9 @@ def _upsert_pending_overdue_notifications(conn, now: datetime) -> None:
         WHERE d.loan_status = 'borrowed'
           AND d.expected_return_at IS NOT NULL
           AND d.overdue_notified = 0
-        """
+          AND d.status <> ?
+        """,
+        (RESIDENT_DEVICE_STATUS,),
     ).fetchall()
     for row in rows:
         try:
@@ -1043,6 +1046,7 @@ def _is_overdue_snapshot_current(conn, notification: Dict[str, Any], now: dateti
         JOIN borrow_records br ON br.id = ? AND br.device_id = d.id AND br.returned_at IS NULL
         WHERE d.id = ?
           AND d.loan_status = 'borrowed'
+          AND d.status <> ?
           AND d.expected_return_at = ?
           AND d.borrower_name IS NOT NULL
           AND TRIM(d.borrower_name) <> ''
@@ -1051,6 +1055,7 @@ def _is_overdue_snapshot_current(conn, notification: Dict[str, Any], now: dateti
         (
             notification["borrow_record_id"],
             notification["device_id"],
+            RESIDENT_DEVICE_STATUS,
             notification["expected_return_at"],
             borrower_name,
         ),
