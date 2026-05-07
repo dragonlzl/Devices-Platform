@@ -594,11 +594,23 @@ body {
   background: rgba(31, 111, 178, 0.08) !important;
 }
 
+.notification-collapse {
+  background: transparent;
+}
+
+.notification-collapse .ant-collapse-content-box {
+  padding: 16px;
+}
+
 .notification-editor {
   display: flex;
   flex-direction: column;
   gap: 12px;
   margin-top: 16px;
+}
+
+.notification-template-preview {
+  white-space: pre-wrap;
 }
 
 @media (max-width: 900px) {

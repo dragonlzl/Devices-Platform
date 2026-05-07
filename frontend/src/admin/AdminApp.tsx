@@ -18,6 +18,7 @@ import {
   Spin,
   Switch,
   Badge,
+  Collapse,
 } from 'antd';
 import {
   PlusOutlined,
@@ -49,6 +50,9 @@ import {
   NotificationParams,
   NotificationSettingItem,
   NotificationSettingsResponse,
+  WebhookNotificationParams,
+  WebhookNotificationSettingItem,
+  WebhookNotificationSettingsResponse,
   SystemItem,
   SystemVersion,
   PortalUser,
@@ -78,6 +82,12 @@ const NOTIFICATION_PARAM_FIELDS: Array<keyof NotificationParams> = [
   'card_color',
   'status_color',
 ];
+const WEBHOOK_NOTIFICATION_PARAM_FIELDS: Array<keyof WebhookNotificationParams> = [
+  'card_title',
+  'body_template',
+  'card_color',
+];
+const DEFAULT_BORROW_ADMIN_URL = 'http://192.168.50.10:8090/admin';
 const getStatusRank = (value?: string | null) => (value === '正常' ? 0 : 1);
 const compareStatus = (a?: string | null, b?: string | null) => {
   const diff = getStatusRank(a) - getStatusRank(b);
@@ -781,11 +791,17 @@ function NotifyDrawer(props: {
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState(false);
   const [settings, setSettings] = useState<NotificationSettingItem[]>([]);
+  const [webhookSettings, setWebhookSettings] = useState<WebhookNotificationSettingItem[]>([]);
   const [colorOptions, setColorOptions] = useState<string[]>([]);
   const [selectedKey, setSelectedKey] = useState('');
+  const [selectedWebhookKey, setSelectedWebhookKey] = useState('');
   const selectedSetting = useMemo(
     () => settings.find((item) => item.key === selectedKey) || settings[0] || null,
     [settings, selectedKey]
+  );
+  const selectedWebhookSetting = useMemo(
+    () => webhookSettings.find((item) => item.key === selectedWebhookKey) || webhookSettings[0] || null,
+    [webhookSettings, selectedWebhookKey]
   );
   const previewParams: NotificationParams = {
     card_title: String(Form.useWatch('card_title', form) ?? selectedSetting?.params.card_title ?? ''),
@@ -793,22 +809,40 @@ function NotifyDrawer(props: {
     card_color: String(Form.useWatch('card_color', form) ?? selectedSetting?.params.card_color ?? 'blue'),
     status_color: String(Form.useWatch('status_color', form) ?? selectedSetting?.params.status_color ?? 'blue'),
   };
+  const webhookPreviewParams: WebhookNotificationParams = {
+    card_title: String(
+      Form.useWatch('webhook_card_title', form) ?? selectedWebhookSetting?.params.card_title ?? ''
+    ),
+    body_template: String(
+      Form.useWatch('webhook_body_template', form) ?? selectedWebhookSetting?.params.body_template ?? ''
+    ),
+    card_color: String(Form.useWatch('webhook_card_color', form) ?? selectedWebhookSetting?.params.card_color ?? 'blue'),
+  };
+  const adminUrlPreview = String(Form.useWatch('admin_url', form) ?? DEFAULT_BORROW_ADMIN_URL);
 
   useEffect(() => {
     if (!props.open) return;
     setLoading(true);
     Promise.all([
-      apiRequest<{ webhook_url: string }>('/api/settings/feishu'),
+      apiRequest<{ webhook_url: string; admin_url: string }>('/api/settings/feishu'),
       apiRequest<NotificationSettingsResponse>('/api/settings/notifications'),
+      apiRequest<WebhookNotificationSettingsResponse>('/api/settings/webhook-notifications'),
     ])
-      .then(([feishuData, notificationData]) => {
+      .then(([feishuData, notificationData, webhookNotificationData]) => {
         const items = notificationData.items || [];
+        const webhookItems = webhookNotificationData.items || [];
         setSettings(items);
+        setWebhookSettings(webhookItems);
         setColorOptions(notificationData.color_options || []);
         setSelectedKey(items[0]?.key || '');
+        setSelectedWebhookKey(webhookItems[0]?.key || '');
         form.setFieldsValue({
           webhook: feishuData.webhook_url || '',
+          admin_url: feishuData.admin_url || webhookNotificationData.admin_url || DEFAULT_BORROW_ADMIN_URL,
           ...(items[0]?.params || {}),
+          webhook_card_title: webhookItems[0]?.params.card_title || '',
+          webhook_body_template: webhookItems[0]?.params.body_template || '',
+          webhook_card_color: webhookItems[0]?.params.card_color || 'blue',
         });
       })
       .catch((err) => message.error(err.message))
@@ -820,11 +854,26 @@ function NotifyDrawer(props: {
     form.setFieldsValue(selectedSetting.params);
   }, [props.open, selectedKey, form]);
 
+  useEffect(() => {
+    if (!props.open || !selectedWebhookSetting) return;
+    form.setFieldsValue({
+      webhook_card_title: selectedWebhookSetting.params.card_title,
+      webhook_body_template: selectedWebhookSetting.params.body_template,
+      webhook_card_color: selectedWebhookSetting.params.card_color,
+    });
+  }, [props.open, selectedWebhookKey, form]);
+
   const pickNotificationParams = (values: Record<string, unknown>): NotificationParams => ({
     card_title: String(values.card_title || '').trim(),
     status: String(values.status || '').trim(),
     card_color: String(values.card_color || '').trim(),
     status_color: String(values.status_color || '').trim(),
+  });
+
+  const pickWebhookNotificationParams = (values: Record<string, unknown>): WebhookNotificationParams => ({
+    card_title: String(values.webhook_card_title || '').trim(),
+    body_template: String(values.webhook_body_template || '').trim(),
+    card_color: String(values.webhook_card_color || '').trim(),
   });
 
   const mergeSelectedParams = (params: NotificationParams) =>
@@ -838,19 +887,46 @@ function NotifyDrawer(props: {
         : item
     );
 
+  const mergeSelectedWebhookParams = (params: WebhookNotificationParams) =>
+    webhookSettings.map((item) =>
+      item.key === selectedWebhookSetting?.key
+        ? {
+            ...item,
+            params,
+            customized: JSON.stringify(params) !== JSON.stringify(item.defaults),
+          }
+        : item
+    );
+
   const handleValuesChange = (changed: Record<string, unknown>, values: Record<string, unknown>) => {
-    if (!selectedSetting) return;
     const changedParam = NOTIFICATION_PARAM_FIELDS.some((field) =>
       Object.prototype.hasOwnProperty.call(changed, field)
     );
-    if (!changedParam) return;
-    setSettings(mergeSelectedParams(pickNotificationParams(values)));
+    if (changedParam && selectedSetting) {
+      setSettings(mergeSelectedParams(pickNotificationParams(values)));
+    }
+    const changedWebhookParam = WEBHOOK_NOTIFICATION_PARAM_FIELDS.some((field) =>
+      Object.prototype.hasOwnProperty.call(changed, `webhook_${field}`)
+    );
+    if (changedWebhookParam && selectedWebhookSetting) {
+      setWebhookSettings(mergeSelectedWebhookParams(pickWebhookNotificationParams(values)));
+    }
   };
 
   const handleResetSelected = () => {
     if (!selectedSetting) return;
     form.setFieldsValue(selectedSetting.defaults);
     setSettings(mergeSelectedParams(selectedSetting.defaults));
+  };
+
+  const handleResetSelectedWebhook = () => {
+    if (!selectedWebhookSetting) return;
+    form.setFieldsValue({
+      webhook_card_title: selectedWebhookSetting.defaults.card_title,
+      webhook_body_template: selectedWebhookSetting.defaults.body_template,
+      webhook_card_color: selectedWebhookSetting.defaults.card_color,
+    });
+    setWebhookSettings(mergeSelectedWebhookParams(selectedWebhookSetting.defaults));
   };
 
   const handleSave = () => {
@@ -860,24 +936,42 @@ function NotifyDrawer(props: {
         const nextSettings = selectedSetting
           ? mergeSelectedParams(pickNotificationParams(values))
           : settings;
+        const nextWebhookSettings = selectedWebhookSetting
+          ? mergeSelectedWebhookParams(pickWebhookNotificationParams(values))
+          : webhookSettings;
         const notificationPayload = nextSettings.reduce<Record<string, NotificationParams>>((acc, item) => {
           acc[item.key] = item.params;
           return acc;
         }, {});
+        const webhookNotificationPayload = nextWebhookSettings.reduce<Record<string, WebhookNotificationParams>>(
+          (acc, item) => {
+            acc[item.key] = item.params;
+            return acc;
+          },
+          {}
+        );
         setSaving(true);
         return Promise.all([
           apiRequest('/api/settings/feishu', {
             method: 'PUT',
-            body: { webhook_url: String(values.webhook || '').trim() },
+            body: {
+              webhook_url: String(values.webhook || '').trim(),
+              admin_url: String(values.admin_url || '').trim(),
+            },
           }),
           apiRequest<NotificationSettingsResponse>('/api/settings/notifications', {
             method: 'PUT',
             body: { settings: notificationPayload },
           }),
+          apiRequest<WebhookNotificationSettingsResponse>('/api/settings/webhook-notifications', {
+            method: 'PUT',
+            body: { settings: webhookNotificationPayload },
+          }),
         ]);
       })
-      .then(([, notificationData]) => {
+      .then(([, notificationData, webhookNotificationData]) => {
         setSettings(notificationData.items || []);
+        setWebhookSettings(webhookNotificationData.items || []);
         setColorOptions(notificationData.color_options || []);
         message.success('保存成功');
       })
@@ -893,126 +987,258 @@ function NotifyDrawer(props: {
   );
 
   return (
-    <Drawer open={props.open} onClose={props.onCancel} width={860} title="通知设置">
+    <Drawer open={props.open} onClose={props.onCancel} width={920} title="通知设置">
       <Spin spinning={loading}>
         <Form layout="vertical" form={form} onValuesChange={handleValuesChange}>
-          <Form.Item
-            label="飞书 Webhook 地址"
-            name="webhook"
-            rules={[{ required: true, message: 'Webhook 不能为空' }]}
-          >
-            <Input placeholder="https://open.feishu.cn/xxx" />
-          </Form.Item>
-          <Typography.Title level={5}>通知参数</Typography.Title>
-          <Table
-            rowKey="key"
-            size="small"
-            pagination={false}
-            dataSource={settings}
-            rowClassName={(record) => (record.key === selectedSetting?.key ? 'notification-row-selected' : '')}
-            columns={[
+          <Collapse
+            className="notification-collapse"
+            defaultActiveKey={['webhook', 'api']}
+            items={[
               {
-                title: '触发点',
-                dataIndex: 'label',
-                render: (_: unknown, record: NotificationSettingItem) => (
-                  <Space direction="vertical" size={2}>
-                    <Typography.Text strong>{record.label}</Typography.Text>
-                    <Typography.Text type="secondary" className="section-note">
-                      {record.description}
-                    </Typography.Text>
+                key: 'webhook',
+                label: 'Webhook 通知设置',
+                children: (
+                  <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                    <Form.Item
+                      label="飞书 Webhook 地址"
+                      name="webhook"
+                      rules={[{ required: true, message: 'Webhook 不能为空' }]}
+                    >
+                      <Input placeholder="https://open.feishu.cn/xxx" />
+                    </Form.Item>
+                    <Form.Item
+                      label="设备借用管理页"
+                      name="admin_url"
+                      rules={[{ required: true, message: '设备借用管理页不能为空' }]}
+                    >
+                      <Input placeholder={DEFAULT_BORROW_ADMIN_URL} />
+                    </Form.Item>
+                    <Table
+                      rowKey="key"
+                      size="small"
+                      pagination={false}
+                      dataSource={webhookSettings}
+                      rowClassName={(record) =>
+                        record.key === selectedWebhookSetting?.key ? 'notification-row-selected' : ''
+                      }
+                      columns={[
+                        {
+                          title: '触发点',
+                          dataIndex: 'label',
+                          render: (_: unknown, record: WebhookNotificationSettingItem) => (
+                            <Space direction="vertical" size={2}>
+                              <Typography.Text strong>{record.label}</Typography.Text>
+                              <Typography.Text type="secondary" className="section-note">
+                                {record.description}
+                              </Typography.Text>
+                            </Space>
+                          ),
+                        },
+                        {
+                          title: '卡片标题',
+                          dataIndex: ['params', 'card_title'],
+                          render: (value: string) => <Typography.Text>{value}</Typography.Text>,
+                        },
+                        {
+                          title: '字段内容',
+                          dataIndex: ['params', 'body_template'],
+                          render: (value: string) => (
+                            <Typography.Text className="section-note">{value.split('\n')[0] || '-'}</Typography.Text>
+                          ),
+                        },
+                        {
+                          title: '卡片颜色',
+                          width: 160,
+                          render: (_: unknown, record: WebhookNotificationSettingItem) => (
+                            <Tag color={record.params.card_color}>{record.params.card_color}</Tag>
+                          ),
+                        },
+                        {
+                          title: '操作',
+                          width: 92,
+                          render: (_: unknown, record: WebhookNotificationSettingItem) => (
+                            <Button
+                              size="small"
+                              type={record.key === selectedWebhookSetting?.key ? 'primary' : 'default'}
+                              icon={<EditOutlined />}
+                              onClick={() => setSelectedWebhookKey(record.key)}
+                            >
+                              编辑
+                            </Button>
+                          ),
+                        },
+                      ]}
+                    />
+                    {selectedWebhookSetting && (
+                      <div className="notification-editor">
+                        <Card size="small" title={`预览：${selectedWebhookSetting.label}`}>
+                          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                            <Space wrap>
+                              <Tag color={webhookPreviewParams.card_color}>卡片 {webhookPreviewParams.card_color}</Tag>
+                              {selectedWebhookSetting.customized && <Tag color="gold">已自定义</Tag>}
+                            </Space>
+                            <Typography.Title level={5} style={{ margin: 0 }}>
+                              {webhookPreviewParams.card_title || '-'}
+                            </Typography.Title>
+                            <Typography.Text className="notification-template-preview">
+                              {webhookPreviewParams.body_template || '-'}
+                            </Typography.Text>
+                            <Typography.Text>设备借用管理页：{adminUrlPreview || '-'}</Typography.Text>
+                          </Space>
+                        </Card>
+                        <Form.Item
+                          label="卡片标题"
+                          name="webhook_card_title"
+                          rules={[{ required: true, message: '卡片标题不能为空' }]}
+                        >
+                          <Input placeholder="输入 Webhook 卡片标题" />
+                        </Form.Item>
+                        <Form.Item
+                          label="字段内容"
+                          name="webhook_body_template"
+                          rules={[{ required: true, message: '字段内容不能为空' }]}
+                        >
+                          <Input.TextArea rows={6} placeholder="每行一个卡片字段" />
+                        </Form.Item>
+                        <Form.Item
+                          label="卡片颜色"
+                          name="webhook_card_color"
+                          rules={[{ required: true, message: '卡片颜色不能为空' }]}
+                        >
+                          <Select options={selectOptions} />
+                        </Form.Item>
+                        <Button icon={<ReloadOutlined />} onClick={handleResetSelectedWebhook}>
+                          恢复当前触发点默认值
+                        </Button>
+                      </div>
+                    )}
                   </Space>
                 ),
               },
               {
-                title: '标题',
-                dataIndex: ['params', 'card_title'],
-                render: (value: string) => <Typography.Text>{value}</Typography.Text>,
-              },
-              {
-                title: '状态文案',
-                dataIndex: ['params', 'status'],
-                render: (value: string) => <Typography.Text>{value}</Typography.Text>,
-              },
-              {
-                title: '颜色',
-                render: (_: unknown, record: NotificationSettingItem) => (
-                  <Space size={4}>
-                    <Tag color={record.params.card_color}>卡片 {record.params.card_color}</Tag>
-                    <Tag color={record.params.status_color}>状态 {record.params.status_color}</Tag>
+                key: 'api',
+                label: 'API 通知设置',
+                children: (
+                  <Space direction="vertical" size={16} style={{ width: '100%' }}>
+                    <Typography.Title level={5} style={{ margin: 0 }}>
+                      通知参数
+                    </Typography.Title>
+                    <Table
+                      rowKey="key"
+                      size="small"
+                      pagination={false}
+                      dataSource={settings}
+                      rowClassName={(record) =>
+                        record.key === selectedSetting?.key ? 'notification-row-selected' : ''
+                      }
+                      columns={[
+                        {
+                          title: '触发点',
+                          dataIndex: 'label',
+                          render: (_: unknown, record: NotificationSettingItem) => (
+                            <Space direction="vertical" size={2}>
+                              <Typography.Text strong>{record.label}</Typography.Text>
+                              <Typography.Text type="secondary" className="section-note">
+                                {record.description}
+                              </Typography.Text>
+                            </Space>
+                          ),
+                        },
+                        {
+                          title: '标题',
+                          dataIndex: ['params', 'card_title'],
+                          render: (value: string) => <Typography.Text>{value}</Typography.Text>,
+                        },
+                        {
+                          title: '状态文案',
+                          dataIndex: ['params', 'status'],
+                          render: (value: string) => <Typography.Text>{value}</Typography.Text>,
+                        },
+                        {
+                          title: '颜色',
+                          render: (_: unknown, record: NotificationSettingItem) => (
+                            <Space size={4}>
+                              <Tag color={record.params.card_color}>卡片 {record.params.card_color}</Tag>
+                              <Tag color={record.params.status_color}>状态 {record.params.status_color}</Tag>
+                            </Space>
+                          ),
+                        },
+                        {
+                          title: '操作',
+                          width: 92,
+                          render: (_: unknown, record: NotificationSettingItem) => (
+                            <Button
+                              size="small"
+                              type={record.key === selectedSetting?.key ? 'primary' : 'default'}
+                              icon={<EditOutlined />}
+                              onClick={() => setSelectedKey(record.key)}
+                            >
+                              编辑
+                            </Button>
+                          ),
+                        },
+                      ]}
+                    />
+                    {selectedSetting && (
+                      <div className="notification-editor">
+                        <Card size="small" title={`预览：${selectedSetting.label}`}>
+                          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+                            <Space wrap>
+                              <Tag color={previewParams.card_color}>卡片 {previewParams.card_color}</Tag>
+                              <Tag color={previewParams.status_color}>状态 {previewParams.status_color}</Tag>
+                              {selectedSetting.customized && <Tag color="gold">已自定义</Tag>}
+                            </Space>
+                            <Typography.Title level={5} style={{ margin: 0 }}>
+                              {previewParams.card_title || '-'}
+                            </Typography.Title>
+                            <Typography.Text>{previewParams.status || '-'}</Typography.Text>
+                            <Typography.Text type="secondary" className="section-note">
+                              变量支持 {'{old_borrower}'} 与 {'{new_borrower}'}，仅借用人变更类通知会替换。
+                            </Typography.Text>
+                          </Space>
+                        </Card>
+                        <Form.Item
+                          label="卡片标题"
+                          name="card_title"
+                          rules={[{ required: true, message: '卡片标题不能为空' }]}
+                        >
+                          <Input placeholder="输入卡片标题" />
+                        </Form.Item>
+                        <Form.Item
+                          label="状态文案"
+                          name="status"
+                          rules={[{ required: true, message: '状态文案不能为空' }]}
+                        >
+                          <Input.TextArea rows={2} placeholder="输入状态文案" />
+                        </Form.Item>
+                        <Space size={12} style={{ width: '100%' }} align="start">
+                          <Form.Item
+                            label="卡片颜色"
+                            name="card_color"
+                            rules={[{ required: true, message: '卡片颜色不能为空' }]}
+                            style={{ flex: 1 }}
+                          >
+                            <Select options={selectOptions} />
+                          </Form.Item>
+                          <Form.Item
+                            label="状态颜色"
+                            name="status_color"
+                            rules={[{ required: true, message: '状态颜色不能为空' }]}
+                            style={{ flex: 1 }}
+                          >
+                            <Select options={selectOptions} />
+                          </Form.Item>
+                        </Space>
+                        <Button icon={<ReloadOutlined />} onClick={handleResetSelected}>
+                          恢复当前触发点默认值
+                        </Button>
+                      </div>
+                    )}
                   </Space>
-                ),
-              },
-              {
-                title: '操作',
-                width: 92,
-                render: (_: unknown, record: NotificationSettingItem) => (
-                  <Button
-                    size="small"
-                    type={record.key === selectedSetting?.key ? 'primary' : 'default'}
-                    icon={<EditOutlined />}
-                    onClick={() => setSelectedKey(record.key)}
-                  >
-                    编辑
-                  </Button>
                 ),
               },
             ]}
           />
-          {selectedSetting && (
-            <div className="notification-editor">
-              <Card size="small" title={`预览：${selectedSetting.label}`}>
-                <Space direction="vertical" size={8} style={{ width: '100%' }}>
-                  <Space wrap>
-                    <Tag color={previewParams.card_color}>卡片 {previewParams.card_color}</Tag>
-                    <Tag color={previewParams.status_color}>状态 {previewParams.status_color}</Tag>
-                    {selectedSetting.customized && <Tag color="gold">已自定义</Tag>}
-                  </Space>
-                  <Typography.Title level={5} style={{ margin: 0 }}>
-                    {previewParams.card_title || '-'}
-                  </Typography.Title>
-                  <Typography.Text>{previewParams.status || '-'}</Typography.Text>
-                  <Typography.Text type="secondary" className="section-note">
-                    变量支持 {'{old_borrower}'} 与 {'{new_borrower}'}，仅借用人变更类通知会替换。
-                  </Typography.Text>
-                </Space>
-              </Card>
-              <Form.Item
-                label="卡片标题"
-                name="card_title"
-                rules={[{ required: true, message: '卡片标题不能为空' }]}
-              >
-                <Input placeholder="输入卡片标题" />
-              </Form.Item>
-              <Form.Item
-                label="状态文案"
-                name="status"
-                rules={[{ required: true, message: '状态文案不能为空' }]}
-              >
-                <Input.TextArea rows={2} placeholder="输入状态文案" />
-              </Form.Item>
-              <Space size={12} style={{ width: '100%' }} align="start">
-                <Form.Item
-                  label="卡片颜色"
-                  name="card_color"
-                  rules={[{ required: true, message: '卡片颜色不能为空' }]}
-                  style={{ flex: 1 }}
-                >
-                  <Select options={selectOptions} />
-                </Form.Item>
-                <Form.Item
-                  label="状态颜色"
-                  name="status_color"
-                  rules={[{ required: true, message: '状态颜色不能为空' }]}
-                  style={{ flex: 1 }}
-                >
-                  <Select options={selectOptions} />
-                </Form.Item>
-              </Space>
-              <Button icon={<ReloadOutlined />} onClick={handleResetSelected}>
-                恢复当前触发点默认值
-              </Button>
-            </div>
-          )}
         </Form>
       </Spin>
       <div className="drawer-footer">

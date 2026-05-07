@@ -84,6 +84,7 @@ class VersionDeleteRequest(BaseModel):
 
 class SettingUpdate(BaseModel):
     webhook_url: str = Field(..., min_length=1)
+    admin_url: Optional[str] = None
 
 
 class NotificationParamUpdate(BaseModel):
@@ -95,6 +96,16 @@ class NotificationParamUpdate(BaseModel):
 
 class NotificationSettingsUpdate(BaseModel):
     settings: Dict[str, NotificationParamUpdate]
+
+
+class WebhookNotificationParamUpdate(BaseModel):
+    card_title: str = Field(..., min_length=1)
+    body_template: str = Field(..., min_length=1)
+    card_color: str = Field(..., min_length=1)
+
+
+class WebhookNotificationSettingsUpdate(BaseModel):
+    settings: Dict[str, WebhookNotificationParamUpdate]
 
 
 class LLMModelCreate(BaseModel):

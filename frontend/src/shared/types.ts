@@ -158,6 +158,12 @@ export interface NotificationParams {
   status_color: string;
 }
 
+export interface WebhookNotificationParams {
+  card_title: string;
+  body_template: string;
+  card_color: string;
+}
+
 export interface NotificationSettingItem {
   key: string;
   label: string;
@@ -170,4 +176,19 @@ export interface NotificationSettingItem {
 export interface NotificationSettingsResponse {
   items: NotificationSettingItem[];
   color_options: string[];
+}
+
+export interface WebhookNotificationSettingItem {
+  key: string;
+  label: string;
+  description: string;
+  defaults: WebhookNotificationParams;
+  params: WebhookNotificationParams;
+  customized: boolean;
+}
+
+export interface WebhookNotificationSettingsResponse {
+  items: WebhookNotificationSettingItem[];
+  color_options: string[];
+  admin_url: string;
 }

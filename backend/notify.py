@@ -1,5 +1,6 @@
 import os
-from typing import Any, Dict, Optional
+import re
+from typing import Any, Dict, List, Optional
 
 import httpx
 
@@ -11,6 +12,8 @@ class NotifyError(RuntimeError):
 PORTAL_NOTIFICATION_TEMPLATE_ID = "AAqepmbB3M23t"
 PORTAL_NOTIFICATION_TEMPLATE_VERSION = "1.0.4"
 DEFAULT_PORTAL_NOTIFICATION_SEND_URL = "http://192.168.50.10:8756/api/notifications/send"
+DEFAULT_BORROW_ADMIN_URL = "http://192.168.50.10:8090/admin"
+DEFAULT_FEISHU_CARD_COLOR = "blue"
 
 
 class PortalNotificationError(NotifyError):
@@ -31,11 +34,67 @@ def build_text_message(title: str, body: str) -> str:
     return f"{title}\n{body}"
 
 
-async def send_feishu_message(client: httpx.AsyncClient, webhook: str, title: str, body: str) -> None:
-    payload = {
-        "msg_type": "text",
-        "content": {"text": build_text_message(title, body)},
+def _split_field_line(line: str) -> Optional[tuple[str, str]]:
+    match = re.match(r"^([^:：]+)[:：]\s*(.*)$", line)
+    if not match:
+        return None
+    return match.group(1).strip(), match.group(2).strip() or "-"
+
+
+def _feishu_card_fields(body: str) -> List[Dict[str, Any]]:
+    fields = []
+    for line in str(body or "").splitlines():
+        cleaned = line.strip()
+        if not cleaned:
+            continue
+        parsed = _split_field_line(cleaned)
+        if parsed:
+            label, value = parsed
+            content = f"**{label}:** {value}"
+        else:
+            content = cleaned
+        fields.append({"is_short": False, "text": {"tag": "lark_md", "content": content}})
+    return fields
+
+
+def build_feishu_card_payload(
+    title: str,
+    body: str,
+    *,
+    card_color: str = DEFAULT_FEISHU_CARD_COLOR,
+    admin_url: str = DEFAULT_BORROW_ADMIN_URL,
+) -> Dict[str, Any]:
+    fields = _feishu_card_fields(body)
+    admin_link = str(admin_url or DEFAULT_BORROW_ADMIN_URL).strip() or DEFAULT_BORROW_ADMIN_URL
+    fields.append(
+        {
+            "is_short": False,
+            "text": {"tag": "lark_md", "content": f"**设备借用管理页:** [点击查看]({admin_link})"},
+        }
+    )
+    return {
+        "msg_type": "interactive",
+        "card": {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": str(card_color or DEFAULT_FEISHU_CARD_COLOR).strip() or DEFAULT_FEISHU_CARD_COLOR,
+                "title": {"tag": "plain_text", "content": str(title or "设备借用通知").strip() or "设备借用通知"},
+            },
+            "elements": [{"tag": "div", "fields": fields}],
+        },
     }
+
+
+async def send_feishu_message(
+    client: httpx.AsyncClient,
+    webhook: str,
+    title: str,
+    body: str,
+    *,
+    card_color: str = DEFAULT_FEISHU_CARD_COLOR,
+    admin_url: str = DEFAULT_BORROW_ADMIN_URL,
+) -> None:
+    payload = build_feishu_card_payload(title, body, card_color=card_color, admin_url=admin_url)
     response = await client.post(webhook, json=payload)
     if response.status_code >= 300:
         raise NotifyError(f"飞书通知失败: {response.status_code} {response.text}")

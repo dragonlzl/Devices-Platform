@@ -314,9 +314,13 @@ def test_admin_notification_settings_preview_and_edit(page, base_url):
     page.goto(f"{base_url}/admin")
     page.get_by_role("button", name="通知设置").click()
     expect(page.locator(".ant-drawer-title", has_text="通知设置")).to_be_visible()
+    expect(page.get_by_text("Webhook 通知设置")).to_be_visible()
+    expect(page.get_by_text("API 通知设置")).to_be_visible()
+    expect(page.get_by_label("设备借用管理页")).to_have_value("http://192.168.50.10:8090/admin")
     expect(page.get_by_text("待借申请提交")).to_be_visible()
 
-    row = page.locator("tr", has_text="借用确认成功").first
+    api_panel = page.locator(".ant-collapse-item", has_text="API 通知设置")
+    row = api_panel.locator("tr", has_text="借用确认成功").first
     row.get_by_role("button", name="编辑").click()
     title_item = page.locator(".ant-form-item", has_text="卡片标题").last
     title_item.get_by_role("textbox").fill("借用确认已完成")

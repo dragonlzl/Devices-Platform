@@ -17,7 +17,13 @@ from openpyxl import Workbook
 
 from .db import db_session, init_db, now_iso
 from .llm import LLMError, call_llm
-from .notify import NotifyError, PortalNotificationError, send_feishu_message, send_portal_notification
+from .notify import (
+    DEFAULT_BORROW_ADMIN_URL,
+    NotifyError,
+    PortalNotificationError,
+    send_feishu_message,
+    send_portal_notification,
+)
 from .schemas import (
     BorrowRequest,
     BorrowerChangeRequest,
@@ -39,6 +45,7 @@ from .schemas import (
     VersionCreate,
     VersionDeleteRequest,
     VersionUpdate,
+    WebhookNotificationSettingsUpdate,
 )
 
 
@@ -74,9 +81,12 @@ RESIDENT_DEVICE_STATUS = "被常驻"
 logger = logging.getLogger(__name__)
 
 NOTIFICATION_SETTINGS_KEY = "portal_notification_params"
+WEBHOOK_NOTIFICATION_SETTINGS_KEY = "feishu_webhook_card_params"
+BORROW_ADMIN_URL_SETTING_KEY = "borrow_admin_url"
 NOTIFICATION_COLOR_OPTIONS = ("blue", "green", "yellow", "orange", "red", "grey")
 NOTIFICATION_PARAM_FIELDS = ("card_title", "status", "card_color", "status_color")
 NOTIFICATION_COLOR_FIELDS = {"card_color", "status_color"}
+WEBHOOK_NOTIFICATION_PARAM_FIELDS = ("card_title", "body_template", "card_color")
 NOTIFICATION_TRIGGER_DEFAULTS: Dict[str, Dict[str, Any]] = {
     "borrow_submit": {
         "label": "待借申请提交",
@@ -85,7 +95,7 @@ NOTIFICATION_TRIGGER_DEFAULTS: Dict[str, Dict[str, Any]] = {
             "card_title": "借用申请已提交",
             "status": "待管理员确认设备状态",
             "card_color": "blue",
-            "status_color": "yellow",
+            "status_color": "blue",
         },
     },
     "borrow_approve": {
@@ -134,8 +144,8 @@ NOTIFICATION_TRIGGER_DEFAULTS: Dict[str, Dict[str, Any]] = {
         "params": {
             "card_title": "设备借用逾期",
             "status": "归还逾期，请及时归还，如需继续使用，请到平台点击延期",
-            "card_color": "orange",
-            "status_color": "orange",
+            "card_color": "red",
+            "status_color": "red",
         },
     },
     "change_borrower_submit_old": {
@@ -145,7 +155,7 @@ NOTIFICATION_TRIGGER_DEFAULTS: Dict[str, Dict[str, Any]] = {
             "card_title": "借用人变更申请",
             "status": "待管理员确认，借用人将变为{new_borrower}",
             "card_color": "blue",
-            "status_color": "yellow",
+            "status_color": "blue",
         },
     },
     "change_borrower_submit_new": {
@@ -155,7 +165,7 @@ NOTIFICATION_TRIGGER_DEFAULTS: Dict[str, Dict[str, Any]] = {
             "card_title": "借用人变更申请",
             "status": "待管理员确认，{old_borrower}将变为{new_borrower}",
             "card_color": "blue",
-            "status_color": "yellow",
+            "status_color": "blue",
         },
     },
     "change_borrower_approve_old": {
@@ -197,6 +207,93 @@ NOTIFICATION_TRIGGER_DEFAULTS: Dict[str, Dict[str, Any]] = {
             "card_color": "red",
             "status_color": "red",
         },
+    },
+}
+WEBHOOK_NOTIFICATION_TRIGGER_DEFAULTS: Dict[str, Dict[str, str]] = {
+    "borrow_submit": {
+        "card_title": "待借通知",
+        "body_template": "借用人名字: {borrower}\n借用的设备型号: {device_model}\n归还时间: {return_time}\n待借设备",
+    },
+    "borrow_approve": {
+        "card_title": "借用通知",
+        "body_template": (
+            "借用人名字: {borrower}\n"
+            "借用的设备型号: {device_model}\n"
+            "借用时间: {borrow_time}\n"
+            "预计归还时间: {return_time}\n"
+            "借用成功"
+        ),
+    },
+    "borrow_cancel": {
+        "card_title": "借用失败通知",
+        "body_template": "借用人名字: {borrower}\n借用的设备型号: {device_model}\n归还时间: {return_time}\n借用失败",
+    },
+    "extend": {
+        "card_title": "延期通知",
+        "body_template": (
+            "借用人名字: {borrower}\n"
+            "借用的设备型号: {device_model}\n"
+            "预计归还时间(旧): {old_return_time}\n"
+            "变更为 预计归还时间(新): {return_time}"
+        ),
+    },
+    "return": {
+        "card_title": "归还通知",
+        "body_template": "借用人名字: {borrower}\n借用的设备型号: {device_model}\n归还时间: {return_time}\n归还成功",
+    },
+    "overdue": {
+        "card_title": "逾期通知",
+        "body_template": "借用人名字: {borrower}\n借用的设备型号: {device_model}\n预计归还时间: {return_time}\n借用时间已逾期",
+    },
+    "change_borrower_submit_old": {
+        "card_title": "借用人变更通知",
+        "body_template": (
+            "设备: {device_model}\n"
+            "变更前借用人: {old_borrower}\n"
+            "变更前归还时间: {old_return_time}\n"
+            "变更后借用人: {new_borrower}\n"
+            "变更后预期归还时间: {return_time}\n"
+            "变更时间: {change_time}"
+        ),
+    },
+    "change_borrower_submit_new": {
+        "card_title": "借用人变更通知",
+        "body_template": (
+            "设备: {device_model}\n"
+            "变更前借用人: {old_borrower}\n"
+            "变更前归还时间: {old_return_time}\n"
+            "变更后借用人: {new_borrower}\n"
+            "变更后预期归还时间: {return_time}\n"
+            "变更时间: {change_time}"
+        ),
+    },
+    "change_borrower_approve_old": {
+        "card_title": "借用人变更成功通知",
+        "body_template": "设备: {device_model}\n新的借用人名字: {new_borrower}\n新的归还时间: {return_time}",
+    },
+    "change_borrower_approve_new": {
+        "card_title": "借用人变更成功通知",
+        "body_template": "设备: {device_model}\n新的借用人名字: {new_borrower}\n新的归还时间: {return_time}",
+    },
+    "change_borrower_cancel_old": {
+        "card_title": "借用人变更失败通知",
+        "body_template": (
+            "设备: {device_model}\n"
+            "变更前借用人: {old_borrower}\n"
+            "变更后借用人: {new_borrower}\n"
+            "预计归还时间: {return_time}\n"
+            "借用人变更失败"
+        ),
+    },
+    "change_borrower_cancel_new": {
+        "card_title": "借用人变更失败通知",
+        "body_template": (
+            "设备: {device_model}\n"
+            "变更前借用人: {old_borrower}\n"
+            "变更后借用人: {new_borrower}\n"
+            "预计归还时间: {return_time}\n"
+            "借用人变更失败"
+        ),
     },
 }
 
@@ -398,6 +495,127 @@ def _save_notification_settings(conn, settings: Dict[str, Any]) -> Dict[str, Dic
             overrides[trigger] = normalized
     _set_setting(conn, NOTIFICATION_SETTINGS_KEY, json.dumps(overrides, ensure_ascii=False, sort_keys=True))
     return overrides
+
+
+def _default_webhook_notification_params(trigger: str) -> Dict[str, str]:
+    defaults = WEBHOOK_NOTIFICATION_TRIGGER_DEFAULTS.get(trigger)
+    if not defaults:
+        raise HTTPException(status_code=400, detail="未知通知触发点")
+    return {
+        "card_title": defaults["card_title"],
+        "body_template": defaults["body_template"],
+        "card_color": _default_notification_params(trigger)["card_color"],
+    }
+
+
+def _normalize_webhook_notification_params(values: Dict[str, Any]) -> Dict[str, str]:
+    cleaned: Dict[str, str] = {}
+    for field in WEBHOOK_NOTIFICATION_PARAM_FIELDS:
+        value = _clean_text(values.get(field))
+        if not value:
+            raise HTTPException(status_code=400, detail="Webhook 通知参数不能为空")
+        if field == "card_color" and value not in NOTIFICATION_COLOR_OPTIONS:
+            raise HTTPException(status_code=400, detail="Webhook 通知颜色参数无效")
+        cleaned[field] = value
+    return cleaned
+
+
+def _load_webhook_notification_param_overrides(conn) -> Dict[str, Dict[str, str]]:
+    value = _get_setting(conn, WEBHOOK_NOTIFICATION_SETTINGS_KEY)
+    if not value:
+        return {}
+    try:
+        raw = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    overrides: Dict[str, Dict[str, str]] = {}
+    for trigger, params in raw.items():
+        if trigger not in NOTIFICATION_TRIGGER_DEFAULTS or not isinstance(params, dict):
+            continue
+        try:
+            overrides[trigger] = _normalize_webhook_notification_params(params)
+        except HTTPException:
+            continue
+    return overrides
+
+
+def _webhook_notification_params_for_trigger(
+    trigger: str, overrides: Dict[str, Dict[str, str]]
+) -> Dict[str, str]:
+    params = _default_webhook_notification_params(trigger)
+    params.update(overrides.get(trigger, {}))
+    return params
+
+
+def _webhook_notification_settings_items(overrides: Dict[str, Dict[str, str]]) -> List[Dict[str, Any]]:
+    items = []
+    for trigger, config in NOTIFICATION_TRIGGER_DEFAULTS.items():
+        params = _webhook_notification_params_for_trigger(trigger, overrides)
+        defaults = _default_webhook_notification_params(trigger)
+        items.append(
+            {
+                "key": trigger,
+                "label": config["label"],
+                "description": config["description"],
+                "defaults": defaults,
+                "params": params,
+                "customized": params != defaults,
+            }
+        )
+    return items
+
+
+def _save_webhook_notification_settings(conn, settings: Dict[str, Any]) -> Dict[str, Dict[str, str]]:
+    overrides: Dict[str, Dict[str, str]] = {}
+    for trigger, params in settings.items():
+        if trigger not in NOTIFICATION_TRIGGER_DEFAULTS:
+            raise HTTPException(status_code=400, detail="未知通知触发点")
+        raw_params = params.model_dump() if hasattr(params, "model_dump") else params.dict()
+        normalized = _normalize_webhook_notification_params(raw_params)
+        if normalized != _default_webhook_notification_params(trigger):
+            overrides[trigger] = normalized
+    _set_setting(conn, WEBHOOK_NOTIFICATION_SETTINGS_KEY, json.dumps(overrides, ensure_ascii=False, sort_keys=True))
+    return overrides
+
+
+def _borrow_admin_url(conn) -> str:
+    return _get_setting(conn, BORROW_ADMIN_URL_SETTING_KEY).strip() or DEFAULT_BORROW_ADMIN_URL
+
+
+def _webhook_card_color_for_trigger(trigger: Optional[str], conn) -> str:
+    if not trigger or trigger not in NOTIFICATION_TRIGGER_DEFAULTS:
+        return "blue"
+    overrides = _load_webhook_notification_param_overrides(conn)
+    return _webhook_notification_params_for_trigger(trigger, overrides)["card_color"]
+
+
+def _build_configured_webhook_message(
+    conn,
+    *,
+    trigger: Optional[str],
+    fallback_title: str,
+    fallback_body: str,
+    template_values: Optional[Dict[str, Any]] = None,
+) -> Dict[str, str]:
+    admin_url = _borrow_admin_url(conn)
+    if not trigger or trigger not in NOTIFICATION_TRIGGER_DEFAULTS:
+        return {"title": fallback_title, "body": fallback_body, "card_color": "blue", "admin_url": admin_url}
+    overrides = _load_webhook_notification_param_overrides(conn)
+    params = _webhook_notification_params_for_trigger(trigger, overrides)
+    values = template_values
+    title = params["card_title"]
+    body = params["body_template"]
+    if values is not None:
+        title = _render_notification_template(title, values)
+        body = _render_notification_template(body, values)
+    return {
+        "title": title,
+        "body": body,
+        "card_color": params["card_color"],
+        "admin_url": admin_url,
+    }
 
 
 def _legacy_borrower_profile(name: Optional[str]) -> Dict[str, Optional[str]]:
@@ -1218,18 +1436,38 @@ def _pending_overdue_notifications(conn, now: datetime) -> List[Dict[str, Any]]:
 async def _send_overdue_webhook_notifications(items: List[Dict[str, Any]]) -> None:
     with db_session() as conn:
         webhook = _get_setting(conn, "feishu_webhook")
+        defaults = _build_configured_webhook_message(
+            conn,
+            trigger="overdue",
+            fallback_title="逾期通知",
+            fallback_body="",
+        )
     if not webhook:
         return
     client: httpx.AsyncClient = app.state.http_client
     for item in items:
-        body = (
+        fallback_body = (
             f"借用人名字: {item['borrower_name'] or '-'}\n"
             f"借用的设备型号: {item['device_model']}\n"
             f"预计归还时间: {_format_notify_time(item['expected_return_at'])}\n"
             "借用时间已逾期"
         )
+        template_values = {
+            "borrower": item["borrower_name"] or "-",
+            "device_model": item["device_model"],
+            "return_time": _format_notify_time(item["expected_return_at"]),
+        }
+        title = _render_notification_template(defaults["title"], template_values)
+        body = _render_notification_template(defaults["body"] or fallback_body, template_values)
         try:
-            await send_feishu_message(client, webhook, "逾期通知", body)
+            await send_feishu_message(
+                client,
+                webhook,
+                title,
+                body,
+                card_color=defaults["card_color"],
+                admin_url=defaults["admin_url"],
+            )
         except Exception as exc:
             logger.warning("旧飞书逾期通知发送失败: notification_id=%s", item["id"])
             with db_session() as conn:
@@ -1309,15 +1547,34 @@ def _overdue_notification_status_summary(conn) -> Dict[str, Any]:
     }
 
 
-async def _queue_notify(title: str, body: str):
+async def _queue_notify(
+    title: str,
+    body: str,
+    trigger: Optional[str] = None,
+    template_values: Optional[Dict[str, Any]] = None,
+):
     webhook = None
     with db_session() as conn:
         webhook = _get_setting(conn, "feishu_webhook")
+        webhook_message = _build_configured_webhook_message(
+            conn,
+            trigger=trigger,
+            fallback_title=title,
+            fallback_body=body,
+            template_values=template_values,
+        )
     if not webhook:
         return
     client: httpx.AsyncClient = app.state.http_client
     try:
-        await send_feishu_message(client, webhook, title, body)
+        await send_feishu_message(
+            client,
+            webhook,
+            webhook_message["title"],
+            webhook_message["body"],
+            card_color=webhook_message["card_color"],
+            admin_url=webhook_message["admin_url"],
+        )
     except NotifyError:
         # 避免通知失败影响主流程
         return
@@ -1740,7 +1997,17 @@ async def borrow_device(device_id: int, payload: BorrowRequest, background_tasks
         f"归还时间: {_format_notify_time(expected_return)}\n"
         "待借设备"
     )
-    background_tasks.add_task(_queue_notify, "待借通知", body)
+    background_tasks.add_task(
+        _queue_notify,
+        "待借通知",
+        body,
+        "borrow_submit",
+        {
+            "borrower": borrower_profile["name"],
+            "device_model": row["model"],
+            "return_time": _format_notify_time(expected_return),
+        },
+    )
     _add_portal_notification_task(
         background_tasks,
         context="borrow_submit",
@@ -1788,7 +2055,19 @@ async def extend_device(device_id: int, payload: ExtendRequest, background_tasks
         f"预计归还时间(旧): {_format_notify_time(row['expected_return_at'])}\n"
         f"变更为 预计归还时间(新): {_format_notify_time(expected_return)}"
     )
-    background_tasks.add_task(_queue_notify, "延期通知", body)
+    background_tasks.add_task(
+        _queue_notify,
+        "延期通知",
+        body,
+        "extend",
+        {
+            "borrower": row["borrower_name"] or "-",
+            "device_model": row["model"],
+            "old_return_time": _format_notify_time(row["expected_return_at"]),
+            "return_time": _format_notify_time(expected_return),
+            "new_return_time": _format_notify_time(expected_return),
+        },
+    )
     _add_portal_notification_task(
         background_tasks,
         context="extend",
@@ -1872,7 +2151,22 @@ async def change_borrower(
         f"变更后预期归还时间: {_format_notify_time(expected_return)}\n"
         f"变更时间: {_format_notify_time(now)}"
     )
-    background_tasks.add_task(_queue_notify, "借用人变更通知", body)
+    background_tasks.add_task(
+        _queue_notify,
+        "借用人变更通知",
+        body,
+        "change_borrower_submit_old",
+        {
+            "borrower": borrower_profile["name"],
+            "device_model": row["model"],
+            "old_borrower": old_borrower or "-",
+            "new_borrower": borrower_profile["name"],
+            "old_return_time": _format_notify_time(old_expected),
+            "return_time": _format_notify_time(expected_return),
+            "new_return_time": _format_notify_time(expected_return),
+            "change_time": _format_notify_time(now),
+        },
+    )
     _add_portal_notification_task(
         background_tasks,
         context="change_borrower_submit_old",
@@ -1942,7 +2236,17 @@ async def return_device(device_id: int, background_tasks: BackgroundTasks, reque
         f"归还时间: {_format_notify_time(now)}\n"
         "归还成功"
     )
-    background_tasks.add_task(_queue_notify, "归还通知", body)
+    background_tasks.add_task(
+        _queue_notify,
+        "归还通知",
+        body,
+        "return",
+        {
+            "borrower": row["borrower_name"] or "-",
+            "device_model": row["model"],
+            "return_time": _format_notify_time(now),
+        },
+    )
     _add_portal_notification_task(
         background_tasks,
         context="return",
@@ -2176,7 +2480,20 @@ async def approve_borrow_request(request_id: int, background_tasks: BackgroundTa
             f"新的借用人名字: {request['borrower_name']}\n"
             f"新的归还时间: {_format_notify_time(request['expected_return_at'])}"
         )
-        background_tasks.add_task(_queue_notify, "借用人变更成功通知", body)
+        background_tasks.add_task(
+            _queue_notify,
+            "借用人变更成功通知",
+            body,
+            "change_borrower_approve_new",
+            {
+                "borrower": new_borrower_profile.get("name") or request["borrower_name"],
+                "device_model": request["device_model"],
+                "old_borrower": old_borrower_profile.get("name") or "-",
+                "new_borrower": new_borrower_profile.get("name") or request["borrower_name"],
+                "return_time": _format_notify_time(request["expected_return_at"]),
+                "new_return_time": _format_notify_time(request["expected_return_at"]),
+            },
+        )
         _add_portal_notification_task(
             background_tasks,
             context="change_borrower_approve_old",
@@ -2220,7 +2537,18 @@ async def approve_borrow_request(request_id: int, background_tasks: BackgroundTa
         f"预计归还时间: {_format_notify_time(request['expected_return_at'])}\n"
         "借用成功"
     )
-    background_tasks.add_task(_queue_notify, "借用通知", body)
+    background_tasks.add_task(
+        _queue_notify,
+        "借用通知",
+        body,
+        "borrow_approve",
+        {
+            "borrower": request["borrower_name"],
+            "device_model": request["device_model"],
+            "borrow_time": _format_notify_time(now),
+            "return_time": _format_notify_time(request["expected_return_at"]),
+        },
+    )
     _add_portal_notification_task(
         background_tasks,
         context="borrow_approve",
@@ -2290,6 +2618,26 @@ async def cancel_borrow_request(request_id: int, background_tasks: BackgroundTas
     if request["request_type"] == "change":
         old_borrower_name = device_context.get("borrower_name") or "-"
         new_borrower_name = request["borrower_name"]
+        body = (
+            f"设备: {request['device_model']}\n"
+            f"变更前借用人: {old_borrower_name}\n"
+            f"变更后借用人: {new_borrower_name}\n"
+            f"预计归还时间: {_format_notify_time(request['expected_return_at'])}\n"
+            "借用人变更失败"
+        )
+        background_tasks.add_task(
+            _queue_notify,
+            "借用人变更失败通知",
+            body,
+            "change_borrower_cancel_new",
+            {
+                "borrower": new_borrower_name,
+                "device_model": request["device_model"],
+                "old_borrower": old_borrower_name,
+                "new_borrower": new_borrower_name,
+                "return_time": _format_notify_time(request["expected_return_at"]),
+            },
+        )
         _add_portal_notification_task(
             background_tasks,
             context="change_borrower_cancel_old",
@@ -2317,6 +2665,23 @@ async def cancel_borrow_request(request_id: int, background_tasks: BackgroundTas
             auth=portal_auth,
         )
     else:
+        body = (
+            f"借用人名字: {request['borrower_name']}\n"
+            f"借用的设备型号: {request['device_model']}\n"
+            f"归还时间: {_format_notify_time(request['expected_return_at'])}\n"
+            "借用失败"
+        )
+        background_tasks.add_task(
+            _queue_notify,
+            "借用失败通知",
+            body,
+            "borrow_cancel",
+            {
+                "borrower": request["borrower_name"],
+                "device_model": request["device_model"],
+                "return_time": _format_notify_time(request["expected_return_at"]),
+            },
+        )
         _add_portal_notification_task(
             background_tasks,
             context="borrow_cancel",
@@ -2406,7 +2771,8 @@ async def export_devices(query: Optional[str] = Query(default=None)):
 async def get_feishu_setting():
     with db_session() as conn:
         webhook = _get_setting(conn, "feishu_webhook")
-    return {"webhook_url": webhook}
+        admin_url = _borrow_admin_url(conn)
+    return {"webhook_url": webhook, "admin_url": admin_url}
 
 
 @app.put("/api/settings/feishu")
@@ -2414,6 +2780,9 @@ async def update_feishu_setting(payload: SettingUpdate):
     _ensure_required(payload.webhook_url, "Webhook")
     with db_session() as conn:
         _set_setting(conn, "feishu_webhook", payload.webhook_url.strip())
+        if payload.admin_url is not None:
+            _ensure_required(payload.admin_url, "设备借用管理页")
+            _set_setting(conn, BORROW_ADMIN_URL_SETTING_KEY, payload.admin_url.strip())
     return {"message": "保存成功"}
 
 
@@ -2432,6 +2801,31 @@ async def update_notification_settings(payload: NotificationSettingsUpdate):
         "message": "保存成功",
         "items": _notification_settings_items(overrides),
         "color_options": list(NOTIFICATION_COLOR_OPTIONS),
+    }
+
+
+@app.get("/api/settings/webhook-notifications")
+async def get_webhook_notification_settings():
+    with db_session() as conn:
+        overrides = _load_webhook_notification_param_overrides(conn)
+        admin_url = _borrow_admin_url(conn)
+    return {
+        "items": _webhook_notification_settings_items(overrides),
+        "color_options": list(NOTIFICATION_COLOR_OPTIONS),
+        "admin_url": admin_url,
+    }
+
+
+@app.put("/api/settings/webhook-notifications")
+async def update_webhook_notification_settings(payload: WebhookNotificationSettingsUpdate):
+    with db_session() as conn:
+        overrides = _save_webhook_notification_settings(conn, payload.settings)
+        admin_url = _borrow_admin_url(conn)
+    return {
+        "message": "保存成功",
+        "items": _webhook_notification_settings_items(overrides),
+        "color_options": list(NOTIFICATION_COLOR_OPTIONS),
+        "admin_url": admin_url,
     }
 
 
