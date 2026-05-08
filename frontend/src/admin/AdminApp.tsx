@@ -2008,19 +2008,22 @@ export default function AdminApp(props: { currentUser: PortalUser }) {
         return (
           <Space direction="vertical" size={4} className="record-return-cell">
             <span>{formatDateTime(value || undefined)}</span>
-            <Button
-              size="small"
-              icon={<BellOutlined />}
-              disabled={!canNotify}
-              loading={notifyingRecordId === record.id}
-              type={canNotify && !hasManualSent ? 'primary' : 'default'}
-              onClick={() => handleTriggerOverdueNotification(record)}
-            >
-              {hasManualSent ? '再通知' : '通知'}
-            </Button>
-            <Tag color={hasManualSent ? 'green' : canNotify ? 'gold' : 'default'} className="record-notify-tag">
-              {hasManualSent ? '已主动触发' : canNotify ? '未主动触发' : '不可触发'}
-            </Tag>
+            {canNotify ? (
+              <Button
+                size="small"
+                icon={<BellOutlined />}
+                loading={notifyingRecordId === record.id}
+                type={!hasManualSent ? 'primary' : 'default'}
+                onClick={() => handleTriggerOverdueNotification(record)}
+              >
+                {hasManualSent ? '再通知' : '通知'}
+              </Button>
+            ) : null}
+            {hasManualSent || canNotify ? (
+              <Tag color={hasManualSent ? 'green' : 'gold'} className="record-notify-tag">
+                {hasManualSent ? '已主动触发' : '未主动触发'}
+              </Tag>
+            ) : null}
           </Space>
         );
       },
