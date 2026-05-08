@@ -302,6 +302,15 @@ body {
   font-size: 12px;
 }
 
+.record-return-cell {
+  align-items: center;
+}
+
+.record-notify-tag {
+  margin-inline-end: 0;
+  font-size: 12px;
+}
+
 .table-card {
   border: 1px solid var(--line);
   background: var(--card);

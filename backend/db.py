@@ -80,6 +80,10 @@ def _ensure_overdue_notification_table(conn: sqlite3.Connection) -> None:
             last_error_status INTEGER,
             webhook_sent_at TEXT,
             webhook_last_error_message TEXT,
+            manual_sent_at TEXT,
+            manual_last_error_code TEXT,
+            manual_last_error_message TEXT,
+            manual_last_error_status INTEGER,
             sent_at TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
@@ -100,6 +104,10 @@ def _ensure_overdue_notification_table(conn: sqlite3.Connection) -> None:
         {
             "webhook_sent_at": "TEXT",
             "webhook_last_error_message": "TEXT",
+            "manual_sent_at": "TEXT",
+            "manual_last_error_code": "TEXT",
+            "manual_last_error_message": "TEXT",
+            "manual_last_error_status": "INTEGER",
         },
     )
 

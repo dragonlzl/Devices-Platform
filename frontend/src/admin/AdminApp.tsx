@@ -38,6 +38,7 @@ import {
   ClockCircleOutlined,
   ProfileOutlined,
   ExportOutlined,
+  BellOutlined,
 } from '@ant-design/icons';
 import { apiRequest } from '../shared/api';
 import PersonDisplay, { personFromBorrower, personFromChange } from '../shared/PersonDisplay';
@@ -1425,6 +1426,7 @@ export default function AdminApp(props: { currentUser: PortalUser }) {
   const [recordsQuery, setRecordsQuery] = useState('');
   const [pendingLoading, setPendingLoading] = useState(false);
   const [recordsLoading, setRecordsLoading] = useState(false);
+  const [notifyingRecordId, setNotifyingRecordId] = useState<number | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
   const [models, setModels] = useState<LLMModel[]>([]);
   const [loading, setLoading] = useState(false);
@@ -1863,6 +1865,30 @@ export default function AdminApp(props: { currentUser: PortalUser }) {
     }
   };
 
+  const canTriggerOverdueNotification = (record: BorrowRecord) => {
+    if (record.status !== 'borrowed' || !record.expected_return_at) {
+      return false;
+    }
+    const expectedAt = Date.parse(record.expected_return_at);
+    return Number.isFinite(expectedAt) && expectedAt < Date.now();
+  };
+
+  const handleTriggerOverdueNotification = async (record: BorrowRecord) => {
+    setNotifyingRecordId(record.id);
+    try {
+      const res = await apiRequest<{ message?: string }>(
+        `/api/borrow-records/${record.id}/overdue-notification`,
+        { method: 'POST' }
+      );
+      message.success(res.message || '逾期通知已发送');
+      await loadBorrowRecords(recordsQuery.trim() || undefined);
+    } catch (err) {
+      message.error((err as Error).message);
+    } finally {
+      setNotifyingRecordId(null);
+    }
+  };
+
   const pendingColumns = [
     {
       title: '类型',
@@ -1976,7 +2002,28 @@ export default function AdminApp(props: { currentUser: PortalUser }) {
       title: '预计归还时间',
       dataIndex: 'expected_return_at',
       key: 'expected_return_at',
-      render: (value: string | null) => formatDateTime(value || undefined),
+      render: (value: string | null, record: BorrowRecord) => {
+        const canNotify = canTriggerOverdueNotification(record);
+        const hasManualSent = Boolean(record.overdue_manual_sent_at);
+        return (
+          <Space direction="vertical" size={4} className="record-return-cell">
+            <span>{formatDateTime(value || undefined)}</span>
+            <Button
+              size="small"
+              icon={<BellOutlined />}
+              disabled={!canNotify}
+              loading={notifyingRecordId === record.id}
+              type={canNotify && !hasManualSent ? 'primary' : 'default'}
+              onClick={() => handleTriggerOverdueNotification(record)}
+            >
+              {hasManualSent ? '再通知' : '通知'}
+            </Button>
+            <Tag color={hasManualSent ? 'green' : canNotify ? 'gold' : 'default'} className="record-notify-tag">
+              {hasManualSent ? '已主动触发' : canNotify ? '未主动触发' : '不可触发'}
+            </Tag>
+          </Space>
+        );
+      },
     },
     {
       title: '归还时间',

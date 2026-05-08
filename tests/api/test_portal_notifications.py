@@ -434,6 +434,71 @@ def test_overdue_notification_waits_for_service_credentials_then_sends(client, m
     assert device["overdue_notified"] == 1
 
 
+def test_manual_overdue_notification_sends_and_marks_active_trigger(client, monkeypatch):
+    calls = []
+    _seed_overdue_device()
+    os.environ["PORTAL_NOTIFICATION_SERVICE_TOKEN"] = "service-token"
+
+    async def fake_send(*args, **kwargs):
+        calls.append(kwargs)
+        return {"success": True, "code": "OK"}
+
+    monkeypatch.setattr(main, "send_portal_notification", fake_send)
+
+    record = client.get("/api/borrow-records").json()["items"][0]
+    assert record["overdue_manual_sent_at"] is None
+
+    response = client.post(f"/api/borrow-records/{record['id']}/overdue-notification")
+
+    assert response.status_code == 200
+    assert response.json()["manual_sent_at"] is not None
+    assert calls[0].get("portal_jwt") is None
+    assert calls[0]["service_id"] == "device-borrow-service"
+    assert calls[0]["service_token"] == "service-token"
+    assert calls[0]["recipient_user_id"] == "ou_alice"
+    assert calls[0]["payload"]["card_title"] == "设备借用逾期"
+    refreshed = client.get("/api/borrow-records").json()["items"][0]
+    assert refreshed["overdue_manual_sent_at"] is not None
+    with db_session() as conn:
+        sent = conn.execute(
+            "SELECT status, sent_at, manual_sent_at FROM overdue_notifications"
+        ).fetchone()
+        device = conn.execute("SELECT overdue_notified FROM devices").fetchone()
+    assert sent["status"] == "sent"
+    assert sent["sent_at"] is not None
+    assert sent["manual_sent_at"] is not None
+    assert device["overdue_notified"] == 1
+
+
+def test_manual_overdue_notification_rejects_unexpired_record(client, monkeypatch):
+    calls = []
+    device_id, _ = _seed_overdue_device()
+    future_at = (datetime.now(timezone.utc) + timedelta(days=1)).isoformat()
+    os.environ["PORTAL_NOTIFICATION_SERVICE_TOKEN"] = "service-token"
+    with db_session() as conn:
+        conn.execute(
+            "UPDATE devices SET expected_return_at = ?, overdue_notified = 0, updated_at = ? WHERE id = ?",
+            (future_at, now_iso(), device_id),
+        )
+        conn.execute(
+            "UPDATE borrow_records SET expected_return_at = ?, updated_at = ? WHERE device_id = ?",
+            (future_at, now_iso(), device_id),
+        )
+
+    async def fake_send(*args, **kwargs):
+        calls.append(kwargs)
+        return {"success": True, "code": "OK"}
+
+    monkeypatch.setattr(main, "send_portal_notification", fake_send)
+    record = client.get("/api/borrow-records").json()["items"][0]
+
+    response = client.post(f"/api/borrow-records/{record['id']}/overdue-notification")
+
+    assert response.status_code == 400
+    assert "尚未超过预计归还时间" in response.json()["detail"]
+    assert calls == []
+
+
 def test_overdue_notification_keeps_legacy_webhook_when_portal_auth_missing(client, monkeypatch):
     portal_calls = []
     webhook_calls = []

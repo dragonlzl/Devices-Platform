@@ -81,6 +81,7 @@ export interface BorrowRecord {
   returned_at: string | null;
   status: string;
   request_id: number | null;
+  overdue_manual_sent_at: string | null;
   borrower_changes?: BorrowerChangeRecord[];
 }
 

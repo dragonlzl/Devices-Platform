@@ -1061,7 +1061,14 @@ def _fetch_borrow_records(conn, query: Optional[str] = None) -> List[Dict[str, A
     sql = (
         "SELECT id, device_id, device_model, borrower_name, borrower_user_id, borrower_open_id, "
         "borrower_avatar_url, borrower_job_title, borrowed_at, expected_return_at, "
-        "returned_at, status, request_id "
+        "returned_at, status, request_id, "
+        "("
+        "SELECT manual_sent_at FROM overdue_notifications od "
+        "WHERE od.borrow_record_id = borrow_records.id "
+        "AND od.expected_return_at = borrow_records.expected_return_at "
+        "AND od.manual_sent_at IS NOT NULL "
+        "ORDER BY od.manual_sent_at DESC LIMIT 1"
+        ") AS overdue_manual_sent_at "
         "FROM borrow_records "
     )
     params: List[Any] = []
@@ -1431,6 +1438,133 @@ def _pending_overdue_notifications(conn, now: datetime) -> List[Dict[str, Any]]:
             "逾期通知快照已失效",
         )
     return pending
+
+
+def _fetch_borrow_record_overdue_context(conn, record_id: int) -> Dict[str, Any]:
+    row = conn.execute(
+        """
+        SELECT br.id AS borrow_record_id, br.device_id, br.device_model,
+               br.borrower_name, br.borrower_user_id, br.borrowed_at,
+               br.expected_return_at, br.returned_at, br.status AS record_status,
+               d.loan_status AS device_loan_status, d.status AS device_status,
+               d.borrower_name AS device_borrower_name,
+               d.borrower_user_id AS device_borrower_user_id,
+               d.expected_return_at AS device_expected_return_at,
+               rq.requested_at
+        FROM borrow_records br
+        JOIN devices d ON d.id = br.device_id
+        LEFT JOIN borrow_requests rq ON rq.id = br.request_id
+        WHERE br.id = ?
+        """,
+        (record_id,),
+    ).fetchone()
+    return dict(row) if row else {}
+
+
+def _validate_manual_overdue_context(item: Dict[str, Any], now: datetime) -> None:
+    if not item:
+        raise HTTPException(status_code=404, detail="借用记录不存在")
+    if item.get("record_status") != "borrowed" or item.get("returned_at") is not None:
+        raise HTTPException(status_code=400, detail="借用记录已归还，不能发送逾期通知")
+    if not item.get("expected_return_at"):
+        raise HTTPException(status_code=400, detail="借用记录缺少预计归还时间")
+    expected = _parse_datetime(item["expected_return_at"])
+    if expected >= now:
+        raise HTTPException(status_code=400, detail="借用记录尚未超过预计归还时间")
+    if not _clean_text(item.get("borrower_user_id")):
+        raise HTTPException(status_code=400, detail="借用人缺少门户用户 ID，无法发送通知")
+    if item.get("device_loan_status") != "borrowed":
+        raise HTTPException(status_code=409, detail="当前设备已不处于借用中")
+    if item.get("device_status") == RESIDENT_DEVICE_STATUS:
+        raise HTTPException(status_code=409, detail="当前设备状态不适合发送逾期通知")
+
+
+def _upsert_manual_overdue_notification(conn, item: Dict[str, Any], now: datetime) -> Dict[str, Any]:
+    _validate_manual_overdue_context(item, now)
+    current = now_iso()
+    borrower_user_id = _clean_text(item["borrower_user_id"])
+    borrower_name = _clean_text(item["borrower_name"])
+    requested_at = item.get("requested_at") or item.get("borrowed_at")
+    conn.execute(
+        """
+        INSERT OR IGNORE INTO overdue_notifications (
+            device_id, borrow_record_id, borrower_user_id, borrower_name, device_model,
+            requested_at, expected_return_at, status, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
+        """,
+        (
+            item["device_id"],
+            item["borrow_record_id"],
+            borrower_user_id,
+            borrower_name,
+            item["device_model"],
+            requested_at,
+            item["expected_return_at"],
+            current,
+            current,
+        ),
+    )
+    row = conn.execute(
+        """
+        SELECT id, device_id, borrow_record_id, borrower_user_id, borrower_name,
+               device_model, requested_at, expected_return_at
+        FROM overdue_notifications
+        WHERE borrow_record_id = ? AND borrower_user_id = ? AND expected_return_at = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (item["borrow_record_id"], borrower_user_id, item["expected_return_at"]),
+    ).fetchone()
+    notification = dict(row) if row else {}
+    if not notification or not _is_overdue_snapshot_current(conn, notification, now):
+        raise HTTPException(status_code=409, detail="借用记录状态已变化，无法发送逾期通知")
+    return notification
+
+
+def _record_manual_overdue_notification_error(conn, notification_id: int, exc: PortalNotificationError) -> None:
+    status_code, code, message = _portal_error_parts(exc)
+    conn.execute(
+        """
+        UPDATE overdue_notifications
+        SET manual_last_error_code = ?, manual_last_error_message = ?,
+            manual_last_error_status = ?, updated_at = ?
+        WHERE id = ?
+        """,
+        (code, message, status_code, now_iso(), notification_id),
+    )
+
+
+def _mark_manual_overdue_notification_sent(conn, notification: Dict[str, Any], sent_at: str) -> bool:
+    now = _parse_datetime(sent_at)
+    if not _is_overdue_snapshot_current(conn, notification, now):
+        _mark_overdue_notification_skipped(
+            conn,
+            notification["id"],
+            "OVERDUE_NOTIFICATION_STALE",
+            "逾期通知快照已失效",
+        )
+        return False
+    cur = conn.execute(
+        """
+        UPDATE overdue_notifications
+        SET status = 'sent',
+            sent_at = COALESCE(sent_at, ?),
+            manual_sent_at = ?,
+            manual_last_error_code = NULL,
+            manual_last_error_message = NULL,
+            manual_last_error_status = NULL,
+            updated_at = ?
+        WHERE id = ?
+        """,
+        (sent_at, sent_at, sent_at, notification["id"]),
+    )
+    if cur.rowcount == 0:
+        return False
+    conn.execute(
+        "UPDATE devices SET overdue_notified = 1, updated_at = ? WHERE id = ?",
+        (sent_at, notification["device_id"]),
+    )
+    return True
 
 
 async def _send_overdue_webhook_notifications(items: List[Dict[str, Any]]) -> None:
@@ -2703,6 +2837,46 @@ async def list_borrow_records(query: Optional[str] = Query(default=None)):
     with db_session() as conn:
         items = _fetch_borrow_records(conn, query)
     return {"items": items}
+
+
+@app.post("/api/borrow-records/{record_id}/overdue-notification")
+async def trigger_borrow_record_overdue_notification(record_id: int):
+    auth = _portal_notification_auth_from_job()
+    if not auth.get("service_token"):
+        raise HTTPException(status_code=401, detail="缺少门户通知服务凭证，无法发送逾期通知")
+
+    checked_at = datetime.now(timezone.utc)
+    with db_session() as conn:
+        item = _fetch_borrow_record_overdue_context(conn, record_id)
+        notification = _upsert_manual_overdue_notification(conn, item, checked_at)
+
+    payload = _build_configured_portal_card_payload(
+        trigger="overdue",
+        borrower=notification["borrower_name"],
+        device_name=notification["device_model"],
+        request_date=notification["requested_at"],
+        return_date=notification["expected_return_at"],
+    )
+    client: httpx.AsyncClient = app.state.http_client
+    try:
+        await send_portal_notification(
+            client,
+            recipient_user_id=notification["borrower_user_id"] or "",
+            payload=payload,
+            service_id=auth.get("service_id"),
+            service_token=auth.get("service_token"),
+        )
+    except PortalNotificationError as exc:
+        _log_portal_notification_error("manual_overdue", exc)
+        with db_session() as conn:
+            _record_manual_overdue_notification_error(conn, notification["id"], exc)
+        raise HTTPException(status_code=exc.status_code or 502, detail=_sanitize_error_message(exc.message))
+
+    sent_at = now_iso()
+    with db_session() as conn:
+        if not _mark_manual_overdue_notification_sent(conn, notification, sent_at):
+            raise HTTPException(status_code=409, detail="借用记录状态已变化，逾期通知发送状态未更新")
+    return {"message": "逾期通知已发送", "manual_sent_at": sent_at}
 
 
 @app.get("/api/devices/export")
